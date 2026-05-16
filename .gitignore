@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build output
+frontend/dist/
+dist/
+frontend/node_modules
+
+# Environment
+.env
+backend/.env.example
+
+.dev.vars
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Wrangler
+.wrangler/
+
+# PM2
+.pm2/
+logs/
+*.log
+
+# Temp
+*.tmp
+*.bak
+/tmp/
