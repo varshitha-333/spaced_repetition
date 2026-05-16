@@ -54,8 +54,21 @@ else:
 
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
 GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5000")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+# ── FIX: strip trailing slash so we never produce 'https://x//api/auth/google/callback' ──
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5000").rstrip("/")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
+# ── FIX: log the EXACT redirect URIs at startup so you can paste them into Google Console ──
+GOOGLE_LOGIN_REDIRECT  = f"{BACKEND_URL}/api/auth/google/callback"
+GOOGLE_DRIVE_REDIRECT  = f"{BACKEND_URL}/api/drive/callback"
+logger.info("═══════════════════════════════════════════════════════")
+logger.info(f"BACKEND_URL  = {BACKEND_URL}")
+logger.info(f"FRONTEND_URL = {FRONTEND_URL}")
+logger.info(f"Google login  redirect_uri = {GOOGLE_LOGIN_REDIRECT}")
+logger.info(f"Google drive  redirect_uri = {GOOGLE_DRIVE_REDIRECT}")
+logger.info("↑ These two URIs MUST be added EXACTLY to Google Cloud Console →")
+logger.info("  APIs & Services → Credentials → OAuth 2.0 Client → Authorized redirect URIs")
+logger.info("═══════════════════════════════════════════════════════")
 APP_FOLDER_NAME = "Learning Intake"
 SHEET_TITLE = "Learning Intake Log"
 REVISION_INTERVALS = [1, 3, 6, 29, 179]
@@ -683,10 +696,11 @@ def api_google_auth():
             "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [f"{BACKEND_URL}/api/auth/google/callback"]
+            "redirect_uris": [GOOGLE_LOGIN_REDIRECT]
         }
     }, scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"])
-    flow.redirect_uri = f"{BACKEND_URL}/api/auth/google/callback"
+    flow.redirect_uri = GOOGLE_LOGIN_REDIRECT
+    logger.info(f"[Google login] Sending redirect_uri to Google: {GOOGLE_LOGIN_REDIRECT}")
     url, state = flow.authorization_url(access_type="offline", prompt="consent")
     session["google_auth_state"] = state
     return jsonify({"auth_url": url})
@@ -701,10 +715,10 @@ def api_google_callback():
                 "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [f"{BACKEND_URL}/api/auth/google/callback"]
+                "redirect_uris": [GOOGLE_LOGIN_REDIRECT]
             }
         }, scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"], state=state)
-        flow.redirect_uri = f"{BACKEND_URL}/api/auth/google/callback"
+        flow.redirect_uri = GOOGLE_LOGIN_REDIRECT
         flow.fetch_token(authorization_response=request.url)
         creds = flow.credentials
         info = requests.get('https://www.googleapis.com/oauth2/v3/userinfo',
@@ -737,10 +751,10 @@ def api_drive_connect():
             "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [f"{BACKEND_URL}/api/drive/callback"]
+            "redirect_uris": [GOOGLE_DRIVE_REDIRECT]
         }
     }, scopes=SCOPES)
-    flow.redirect_uri = f"{BACKEND_URL}/api/drive/callback"
+    flow.redirect_uri = GOOGLE_DRIVE_REDIRECT
     url, state = flow.authorization_url(access_type='offline', prompt='consent')
     session['drive_auth_state'] = state
     return jsonify({"auth_url": url})
@@ -758,10 +772,10 @@ def api_drive_callback():
                 "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [f"{BACKEND_URL}/api/drive/callback"]
+                "redirect_uris": [GOOGLE_DRIVE_REDIRECT]
             }
         }, scopes=SCOPES, state=state)
-        flow.redirect_uri = f"{BACKEND_URL}/api/drive/callback"
+        flow.redirect_uri = GOOGLE_DRIVE_REDIRECT
         flow.fetch_token(authorization_response=request.url)
         creds = flow.credentials
         cd = {

@@ -7,8 +7,23 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // Run once on mount
   useEffect(() => {
     checkAuth();
+  }, []);
+
+  // ── FIX: when backend redirects to /dashboard?login=success after Google OAuth,
+  //         force a fresh /api/auth/me call so we pick up the new session cookie
+  //         and then clean the URL so it doesn't loop on refresh.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('login') === 'success') {
+      checkAuth().then(() => {
+        params.delete('login');
+        const clean = window.location.pathname + (params.toString() ? `?${params}` : '');
+        window.history.replaceState({}, '', clean);
+      });
+    }
   }, []);
 
   const checkAuth = async () => {
@@ -30,7 +45,6 @@ export function AuthProvider({ children }) {
 
   const register = async (username, password, email) => {
     const res = await apiRegister(username, password, email);
-    // Backend auto-logs-in on register and returns { user: {...} }
     if (res?.data?.user) setUser(res.data.user);
     return res;
   };
