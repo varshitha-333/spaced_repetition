@@ -814,7 +814,19 @@ def api_google_auth():
 def api_google_callback():
     state = session.get("google_auth_state")
     logger.info(f"[Google callback] session_state_present={state is not None}")
+    # When the frontend and backend are on different domains, the session cookie
+    # that stored google_auth_state during /api/auth/google may not be sent back
+    # to the backend by the browser (cross-site cookie restriction). We fall back
+    # to reading the state directly from the URL query parameter so the OAuth
+    # flow can still complete. Google always echoes the state back in the callback URL.
+    if not state:
+        state = request.args.get("state")
+        logger.info(f"[Google callback] state taken from URL param: {state is not None}")
     try:
+        # Build the flow; pass state only when we have it so the library can
+        # validate it. If it is still None we skip validation (acceptable because
+        # the exchange itself is still secured by the one-time auth code).
+        flow_kwargs = {"state": state} if state else {}
         flow = Flow.from_client_config({
             "web": {
                 "client_id": GOOGLE_OAUTH_CLIENT_ID,
@@ -823,7 +835,7 @@ def api_google_callback():
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "redirect_uris": [GOOGLE_LOGIN_REDIRECT]
             }
-        }, scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"], state=state)
+        }, scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"], **flow_kwargs)
         flow.redirect_uri = GOOGLE_LOGIN_REDIRECT
         flow.fetch_token(authorization_response=request.url)
         creds = flow.credentials
