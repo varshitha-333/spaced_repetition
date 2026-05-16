@@ -2,8 +2,10 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useAuth } from '../hooks/useAuth';
+import { getGoogleAuthUrl } from '../utils/api';
 import toast from 'react-hot-toast';
 import { FiUser, FiMail, FiLock, FiArrowRight } from 'react-icons/fi';
+import { FcGoogle } from 'react-icons/fc';
 
 export default function Register() {
   const [username, setUsername] = useState('');
@@ -11,7 +13,7 @@ export default function Register() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const { register } = useAuth();
+  const { register, checkAuth } = useAuth();
   const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
@@ -31,12 +33,30 @@ export default function Register() {
     setLoading(true);
     try {
       await register(username, password, email);
-      toast.success('Account created! Please login.');
-      navigate('/login');
+      toast.success('Account created! Welcome 🎉');
+      // Backend auto-logs-in after register, so refresh auth + go to dashboard
+      await checkAuth();
+      navigate('/dashboard');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Registration failed');
+      // Surface real backend error (helps debugging)
+      const msg = err?.response?.data?.error || err?.message || 'Registration failed';
+      toast.error(msg);
+      console.error('Register error:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleGoogleSignup = async () => {
+    try {
+      const res = await getGoogleAuthUrl('register');
+      if (res.data?.auth_url && res.data.auth_url !== '#') {
+        window.location.href = res.data.auth_url;
+      } else {
+        toast.error('Google sign-up not configured on backend');
+      }
+    } catch (err) {
+      toast.error(err?.response?.data?.error || 'Google sign-up unavailable');
     }
   };
 
@@ -67,6 +87,7 @@ export default function Register() {
 
         <div className="glass-card p-8">
           <h2 className="text-xl font-bold text-gray-800 mb-6 text-center">Create Account</h2>
+
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-1.5">Username</label>
@@ -108,6 +129,27 @@ export default function Register() {
               )}
             </button>
           </form>
+
+          {/* ── divider ── */}
+          <div className="relative my-6">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-gray-200" />
+            </div>
+            <div className="relative flex justify-center">
+              <span className="bg-white px-4 text-sm text-gray-400">or sign up with</span>
+            </div>
+          </div>
+
+          {/* ── Google Sign-Up button (NEW) ── */}
+          <button
+            type="button"
+            onClick={handleGoogleSignup}
+            className="w-full flex items-center justify-center gap-3 px-6 py-3 rounded-xl border-2 border-gray-200 bg-white hover:bg-gray-50 hover:border-gray-300 transition-all duration-300 font-medium text-gray-700"
+          >
+            <FcGoogle size={22} />
+            <span>Sign up with Google</span>
+          </button>
+
           <p className="text-center text-sm text-gray-500 mt-6">
             Already have an account?{' '}
             <Link to="/login" className="text-primary-600 font-semibold hover:underline">Sign in</Link>

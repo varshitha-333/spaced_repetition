@@ -1,5 +1,7 @@
 import axios from 'axios';
 
+// In production (Vercel), set VITE_API_URL = https://spaced-repetition-59xo.onrender.com
+// In dev (localhost), leave it empty and Vite proxies /api/* to localhost:5000
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
 const api = axios.create({
@@ -10,7 +12,7 @@ const api = axios.create({
   },
 });
 
-// Auth
+// ── Auth ──
 export const login = (username, password) =>
   api.post('/api/auth/login', { username, password });
 
@@ -21,14 +23,15 @@ export const logout = () => api.post('/api/auth/logout');
 
 export const getMe = () => api.get('/api/auth/me');
 
-export const getGoogleAuthUrl = () => api.get('/api/auth/google');
+// mode = 'login' | 'register'  (purely informational for the backend)
+export const getGoogleAuthUrl = (mode = 'login') =>
+  api.get('/api/auth/google', { params: { mode } });
 
-// Drive
+// ── Drive ──
 export const connectDrive = () => api.get('/api/drive/connect');
-
 export const disconnectDrive = () => api.post('/api/drive/disconnect');
 
-// Upload
+// ── Upload ──
 export const uploadPreview = (formData) =>
   api.post('/api/upload/preview', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -36,27 +39,18 @@ export const uploadPreview = (formData) =>
 
 export const uploadSave = (data) => api.post('/api/upload/save', data);
 
-// Revisions
+// ── Revisions ──
 export const getTodayRevisions = () => api.get('/api/revisions/today');
-
 export const getOverdueRevisions = () => api.get('/api/revisions/overdue');
-
 export const getCompletedRevisions = () => api.get('/api/revisions/completed');
-
 export const getUpcomingRevisions = () => api.get('/api/revisions/upcoming');
-
 export const getRevisionStats = () => api.get('/api/revisions/stats');
 
-export const completeRevision = (id) =>
-  api.post(`/api/revisions/${id}/complete`);
+export const completeRevision = (id) => api.post(`/api/revisions/${id}/complete`);
+export const postponeRevision = (id) => api.post(`/api/revisions/${id}/postpone`);
+export const skipRevision = (id) => api.post(`/api/revisions/${id}/skip`);
 
-export const postponeRevision = (id) =>
-  api.post(`/api/revisions/${id}/postpone`);
-
-export const skipRevision = (id) =>
-  api.post(`/api/revisions/${id}/skip`);
-
-// Learnings
+// ── Learnings ──
 export const getLearnings = () => api.get('/api/learnings');
 
 export default api;

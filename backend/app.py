@@ -4,7 +4,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify, session, redirect as flask_redirect
 from flask_cors import CORS
 from PyPDF2 import PdfReader
 from docx import Document
@@ -21,6 +21,7 @@ import logging
 import uuid
 import json
 import io
+import traceback
 from tempfile import NamedTemporaryFile
 import urllib.parse
 
@@ -39,7 +40,17 @@ SCOPES = [
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "learning-intake-uploads")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ── FIX: don't crash on missing env vars (so Render boots and we can see errors) ──
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info("✅ Supabase client initialised")
+    except Exception as e:
+        logger.error(f"❌ Supabase init failed: {e}")
+else:
+    logger.warning("⚠️  SUPABASE_URL / SUPABASE_KEY missing — backend in degraded mode")
 
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
 GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
@@ -51,17 +62,63 @@ REVISION_INTERVALS = [1, 3, 6, 29, 179]
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-to-a-strong-secret-in-production")
+
+# ── FIX: cross-site cookie settings (Vercel ↔ Render) ──
 app.config['SESSION_COOKIE_SAMESITE'] = 'None'
 app.config['SESSION_COOKIE_SECURE'] = True
+app.config['SESSION_COOKIE_HTTPONLY'] = True
 
-CORS(app, supports_credentials=True, origins=[
+# ── FIX: explicit CORS list including the actual Vercel domain + previews ──
+ALLOWED_ORIGINS = [
     FRONTEND_URL,
     "http://localhost:5173",
     "http://localhost:3000",
-])
+    "https://spaced-repetition-umber.vercel.app",
+]
+# also accept any *.vercel.app preview deployment of this project
+CORS(
+    app,
+    supports_credentials=True,
+    origins=ALLOWED_ORIGINS + [r"https://.*\.vercel\.app$"],
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+)
+
+# ═══════════════════════════════════════════════════════
+#  ROOT + HEALTH ROUTES  (FIX for Render 404 → worker kill)
+# ═══════════════════════════════════════════════════════
+@app.route("/")
+def root():
+    return jsonify({
+        "service": "LearnFlow Backend",
+        "status": "running",
+        "version": "1.0",
+        "supabase": "connected" if supabase else "not_configured",
+        "endpoints": ["/api/auth/register", "/api/auth/login", "/api/auth/me", "/api/health"]
+    })
+
+@app.route("/health")
+def health_root():
+    return jsonify({"status": "ok"})
+
+@app.route("/api/health")
+def api_health():
+    return jsonify({
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "supabase": bool(supabase),
+        "frontend_url": FRONTEND_URL,
+    })
+
+@app.route("/privacy")
+def privacy():
+    return jsonify({"privacy": "Privacy Policy"})
+
 
 # ─── BUCKET SETUP ───
 def ensure_bucket_exists():
+    if not supabase:
+        return False
     try:
         buckets = supabase.storage.list_buckets()
         bucket_names = [b.name for b in buckets]
@@ -96,46 +153,60 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
-@app.route("/privacy")
-def privacy():
-    return "privacy policy"
+
 # ─── DATABASE HELPERS ───
 def get_user_by_username(username):
+    if not supabase:
+        return None
     try:
         r = supabase.table('users').select('*').eq('username', username).execute()
         return r.data[0] if r.data else None
-    except:
+    except Exception as e:
+        logger.error(f"get_user_by_username error: {e}")
         return None
 
 def get_user_by_email(email):
+    if not supabase:
+        return None
     try:
         r = supabase.table('users').select('*').eq('email', email).execute()
         return r.data[0] if r.data else None
-    except:
+    except Exception as e:
+        logger.error(f"get_user_by_email error: {e}")
         return None
 
 def create_user(username, password_hash, email):
+    """Returns (user_id, error_message). user_id is None on failure."""
+    if not supabase:
+        return None, "Database not configured (SUPABASE_URL/SUPABASE_KEY missing)"
     try:
         r = supabase.table('users').insert({
             'username': username,
             'password_hash': password_hash,
             'email': email
         }).execute()
+        if not r.data:
+            return None, "Insert returned no rows (check RLS policies on 'users' table)"
         uid = r.data[0]['id']
-        supabase.table('user_state').insert({
-            'user_id': uid,
-            'drive_connected': False,
-            'spreadsheet_id': None,
-            'current_streak': 0,
-            'last_completion_date': None,
-            'google_drive_credentials': None
-        }).execute()
-        return uid
+        try:
+            supabase.table('user_state').insert({
+                'user_id': uid,
+                'drive_connected': False,
+                'spreadsheet_id': None,
+                'current_streak': 0,
+                'last_completion_date': None,
+                'google_drive_credentials': None
+            }).execute()
+        except Exception as e:
+            logger.warning(f"user_state insert failed (non-fatal): {e}")
+        return uid, None
     except Exception as e:
-        logger.error(f"Create user error: {e}")
-        return None
+        err = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"Create user error: {err}\n{traceback.format_exc()}")
+        return None, err
 
 def get_user_state(user_id):
+    if not supabase: return None
     try:
         r = supabase.table('user_state').select('*').eq('user_id', user_id).execute()
         return r.data[0] if r.data else None
@@ -143,6 +214,7 @@ def get_user_state(user_id):
         return None
 
 def update_user_state(user_id, **kwargs):
+    if not supabase: return False
     try:
         supabase.table('user_state').update(kwargs).eq('user_id', user_id).execute()
         return True
@@ -150,6 +222,7 @@ def update_user_state(user_id, **kwargs):
         return False
 
 def save_drive_credentials(user_id, creds_json):
+    if not supabase: return False
     try:
         supabase.table('user_state').update({
             'google_drive_credentials': creds_json,
@@ -160,6 +233,7 @@ def save_drive_credentials(user_id, creds_json):
         return False
 
 def get_drive_credentials(user_id):
+    if not supabase: return None
     try:
         r = supabase.table('user_state').select('google_drive_credentials').eq('user_id', user_id).execute()
         if r.data and r.data[0]['google_drive_credentials']:
@@ -177,6 +251,7 @@ def sanitize_filename(filename):
     return f"{name[:100]}{ext}"
 
 def upload_to_supabase(user_id, file_data, filename):
+    if not supabase: return None
     try:
         ensure_bucket_exists()
         safe = sanitize_filename(filename)
@@ -206,12 +281,14 @@ def upload_to_supabase(user_id, file_data, filename):
         return None
 
 def download_from_supabase(path):
+    if not supabase: return None
     try:
         return supabase.storage.from_(SUPABASE_BUCKET).download(path)
     except:
         return None
 
 def get_supabase_url(path):
+    if not supabase: return None
     try:
         r = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(path, expires_in=3600)
         return r.get('signedURL')
@@ -219,6 +296,7 @@ def get_supabase_url(path):
         return None
 
 def cleanup_old_files(user_id):
+    if not supabase: return
     try:
         cutoff = (datetime.utcnow() - timedelta(days=10)).isoformat()
         old = supabase.table('uploaded_files').select('*').eq('user_id', user_id).lt('upload_date', cutoff).execute()
@@ -245,6 +323,7 @@ def get_user_streak(user_id):
     return 0, None
 
 def update_streak(user_id):
+    if not supabase: return 0
     try:
         today = date.today().isoformat()
         due = supabase.table('revisions').select('id').eq('user_id', user_id).eq('scheduled_date', today).eq('completed', False).execute()
@@ -266,6 +345,7 @@ def update_streak(user_id):
 
 # ─── REVISIONS ───
 def schedule_revisions(user_id, item_id, heading, description, drive_link=None, url=None, supabase_path=None):
+    if not supabase: return False
     try:
         today = date.today()
         for i, interval in enumerate(REVISION_INTERVALS, 1):
@@ -294,6 +374,8 @@ def schedule_revisions(user_id, item_id, heading, description, drive_link=None, 
         return False
 
 def get_revision_stats(user_id):
+    if not supabase:
+        return {"today": 0, "overdue": 0, "completed_today": 0, "tomorrow": 0, "future": 0}
     try:
         today = date.today().isoformat()
         tomorrow = (date.today() + timedelta(days=1)).isoformat()
@@ -510,34 +592,59 @@ def append_to_sheet(user_id, data):
 # ─── AUTH ───
 @app.route("/api/auth/register", methods=["POST"])
 def api_register():
-    data = request.get_json()
-    username = data.get("username", "").strip()
-    password = data.get("password", "").strip()
-    email = data.get("email", "").strip()
-    if not username or not password or not email:
-        return jsonify({"error": "All fields required"}), 400
-    if get_user_by_username(username):
-        return jsonify({"error": "Username already exists"}), 400
-    if get_user_by_email(email):
-        return jsonify({"error": "Email already registered"}), 400
-    uid = create_user(username, generate_password_hash(password), email)
-    if uid:
-        return jsonify({"message": "Registration successful"}), 201
-    return jsonify({"error": "Registration failed"}), 500
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        username = data.get("username", "").strip()
+        password = data.get("password", "").strip()
+        email = data.get("email", "").strip()
+
+        if not username or not password or not email:
+            return jsonify({"error": "All fields required"}), 400
+        if len(password) < 6:
+            return jsonify({"error": "Password must be at least 6 characters"}), 400
+        if not supabase:
+            return jsonify({"error": "Backend database not configured. Contact administrator."}), 503
+        if get_user_by_username(username):
+            return jsonify({"error": "Username already exists"}), 400
+        if get_user_by_email(email):
+            return jsonify({"error": "Email already registered"}), 400
+
+        uid, err = create_user(username, generate_password_hash(password), email)
+        if uid:
+            # auto-login after registration
+            session['user_id'] = uid
+            session['username'] = username
+            return jsonify({
+                "message": "Registration successful",
+                "user": {"id": uid, "username": username, "email": email}
+            }), 201
+        # Show real error to help debug RLS / table-missing issues
+        return jsonify({"error": f"Registration failed: {err or 'unknown'}"}), 500
+    except Exception as e:
+        logger.error(f"Register endpoint crashed: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
+
 
 @app.route("/api/auth/login", methods=["POST"])
 def api_login():
-    data = request.get_json()
-    username = data.get("username", "").strip()
-    password = data.get("password", "").strip()
-    if not username or not password:
-        return jsonify({"error": "Credentials required"}), 400
-    user = get_user_by_username(username)
-    if user and check_password_hash(user['password_hash'], password):
-        session['user_id'] = user['id']
-        session['username'] = username
-        return jsonify({"message": "Login successful", "user": {"id": user['id'], "username": username, "email": user.get('email')}})
-    return jsonify({"error": "Invalid credentials"}), 401
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        username = data.get("username", "").strip()
+        password = data.get("password", "").strip()
+        if not username or not password:
+            return jsonify({"error": "Credentials required"}), 400
+        if not supabase:
+            return jsonify({"error": "Backend database not configured"}), 503
+        user = get_user_by_username(username)
+        if user and user.get('password_hash') and check_password_hash(user['password_hash'], password):
+            session['user_id'] = user['id']
+            session['username'] = username
+            return jsonify({"message": "Login successful", "user": {"id": user['id'], "username": username, "email": user.get('email')}})
+        return jsonify({"error": "Invalid credentials"}), 401
+    except Exception as e:
+        logger.error(f"Login error: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
+
 
 @app.route("/api/auth/logout", methods=["POST"])
 def api_logout():
@@ -563,8 +670,13 @@ def api_me():
 
 
 # ─── GOOGLE AUTH (Sign in with Google) ───
+# Accepts ?mode=register or ?mode=login (UI only — behaviour is identical)
 @app.route("/api/auth/google")
 def api_google_auth():
+    if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET:
+        return jsonify({"error": "Google OAuth not configured"}), 503
+    mode = request.args.get("mode", "login")
+    session["google_auth_mode"] = mode
     flow = Flow.from_client_config({
         "web": {
             "client_id": GOOGLE_OAUTH_CLIENT_ID,
@@ -582,29 +694,37 @@ def api_google_auth():
 @app.route("/api/auth/google/callback")
 def api_google_callback():
     state = session.get("google_auth_state")
-    flow = Flow.from_client_config({
-        "web": {
-            "client_id": GOOGLE_OAUTH_CLIENT_ID,
-            "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [f"{BACKEND_URL}/api/auth/google/callback"]
-        }
-    }, scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"], state=state)
-    flow.redirect_uri = f"{BACKEND_URL}/api/auth/google/callback"
-    flow.fetch_token(authorization_response=request.url)
-    creds = flow.credentials
-    info = requests.get('https://www.googleapis.com/oauth2/v3/userinfo', headers={'Authorization': f'Bearer {creds.token}'}).json()
-    email = info.get('email')
-    user = get_user_by_email(email)
-    if not user:
-        uname = email.split('@')[0] + '_' + uuid.uuid4().hex[:8]
-        uid = create_user(uname, generate_password_hash(uuid.uuid4().hex), email)
+    try:
+        flow = Flow.from_client_config({
+            "web": {
+                "client_id": GOOGLE_OAUTH_CLIENT_ID,
+                "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [f"{BACKEND_URL}/api/auth/google/callback"]
+            }
+        }, scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"], state=state)
+        flow.redirect_uri = f"{BACKEND_URL}/api/auth/google/callback"
+        flow.fetch_token(authorization_response=request.url)
+        creds = flow.credentials
+        info = requests.get('https://www.googleapis.com/oauth2/v3/userinfo',
+                            headers={'Authorization': f'Bearer {creds.token}'}).json()
+        email = info.get('email')
+        if not email:
+            return flask_redirect(f"{FRONTEND_URL}/login?error=google_no_email")
         user = get_user_by_email(email)
-    session['user_id'] = user['id']
-    session['username'] = user['username']
-    from flask import redirect as flask_redirect
-    return flask_redirect(f"{FRONTEND_URL}/dashboard?login=success")
+        if not user:
+            uname = email.split('@')[0] + '_' + uuid.uuid4().hex[:6]
+            uid, err = create_user(uname, generate_password_hash(uuid.uuid4().hex), email)
+            if not uid:
+                return flask_redirect(f"{FRONTEND_URL}/login?error=signup_failed")
+            user = get_user_by_email(email)
+        session['user_id'] = user['id']
+        session['username'] = user['username']
+        return flask_redirect(f"{FRONTEND_URL}/dashboard?login=success")
+    except Exception as e:
+        logger.error(f"Google callback error: {e}\n{traceback.format_exc()}")
+        return flask_redirect(f"{FRONTEND_URL}/login?error=google_failed")
 
 
 # ─── GOOGLE DRIVE CONNECTION ───
@@ -630,7 +750,6 @@ def api_drive_callback():
     uid = session.get('user_id')
     state = session.get('drive_auth_state')
     if not uid:
-        from flask import redirect as flask_redirect
         return flask_redirect(f"{FRONTEND_URL}/login?error=session_expired")
     try:
         flow = Flow.from_client_config({
@@ -654,11 +773,9 @@ def api_drive_callback():
             'scopes': list(creds.scopes) if creds.scopes else SCOPES
         }
         save_drive_credentials(uid, json.dumps(cd))
-        from flask import redirect as flask_redirect
         return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=connected")
     except Exception as e:
         logger.error(f"Drive callback error: {e}")
-        from flask import redirect as flask_redirect
         return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=error")
 
 @app.route("/api/drive/disconnect", methods=["POST"])
@@ -724,7 +841,6 @@ def api_save():
     if not heading:
         return jsonify({"error": "Title is required"}), 400
 
-    # Try Drive upload if connected
     drive_link = None
     state = get_user_state(uid)
     dc = state and state.get('drive_connected') and get_drive_credentials(uid)
@@ -805,7 +921,6 @@ def api_upcoming():
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
     r = supabase.table('revisions').select('*').eq('user_id', uid).gte('scheduled_date', tomorrow).eq('completed', False).order('scheduled_date').execute()
     revisions = [_build_revision(row) for row in r.data]
-    # Group by date
     grouped = {}
     for rev in revisions:
         d = rev['scheduled_date']
@@ -846,7 +961,6 @@ def api_postpone(revision_id):
 @app.route("/api/revisions/<revision_id>/skip", methods=["POST"])
 @login_required
 def api_skip(revision_id):
-    """Skip a revision — reschedule to the next day"""
     uid = session['user_id']
     r = supabase.table('revisions').select('scheduled_date').eq('id', revision_id).eq('user_id', uid).execute()
     if not r.data:
@@ -879,12 +993,8 @@ def api_download(supabase_path):
     return jsonify({"error": "File not found"}), 404
 
 
-# ─── HEALTH ───
-@app.route("/api/health")
-def health():
-    return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
-
-
 if __name__ == "__main__":
-    ensure_bucket_exists()
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    if supabase:
+        ensure_bucket_exists()
+    port = int(os.getenv("PORT", 5000))
+    app.run(debug=True, host="0.0.0.0", port=port)

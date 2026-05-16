@@ -29,7 +29,10 @@ export function AuthProvider({ children }) {
   };
 
   const register = async (username, password, email) => {
-    return await apiRegister(username, password, email);
+    const res = await apiRegister(username, password, email);
+    // Backend auto-logs-in on register and returns { user: {...} }
+    if (res?.data?.user) setUser(res.data.user);
+    return res;
   };
 
   const logout = async () => {
