@@ -7,7 +7,6 @@ __pycache__/
 venv/
 
 # Build output
-frontend/dist/
 dist/
 frontend/node_modules
 

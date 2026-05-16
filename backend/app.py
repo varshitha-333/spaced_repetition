@@ -96,7 +96,9 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
-
+@app.route("/privacy")
+def privacy():
+    return "privacy policy"
 # ─── DATABASE HELPERS ───
 def get_user_by_username(username):
     try:
