@@ -1,142 +1,103 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../hooks/useAuth';
-import {
-  FiHome, FiUpload, FiCalendar, FiClock, FiBook,
-  FiLogOut, FiMenu, FiX
-} from 'react-icons/fi';
+import { getPremiumStatus } from '../services/api';
+import PremiumBadge from './PremiumBadge';
 
-const navItems = [
-  { path: '/dashboard', label: 'Dashboard', icon: FiHome },
-  { path: '/upload', label: 'Upload', icon: FiUpload },
-  { path: '/today', label: 'Today', icon: FiCalendar },
-  { path: '/upcoming', label: 'Upcoming', icon: FiClock },
-  { path: '/history', label: 'History', icon: FiBook },
+const links = [
+  { to: '/dashboard', label: 'Today' },
+  { to: '/upload',    label: 'Add' },
+  { to: '/upcoming',  label: 'Upcoming' },
+  { to: '/premium',   label: 'AI Lab' },
+  { to: '/history',   label: 'History' },
 ];
 
 export default function Navbar() {
   const { user, logout } = useAuth();
-  const location = useLocation();
-  const navigate = useNavigate();
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const nav = useNavigate();
+  const loc = useLocation();
+  const [premium, setPremium] = useState(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!user) return;
+    getPremiumStatus().then(r => setPremium(r.data)).catch(() => {});
+  }, [user, loc.pathname]);
 
   const handleLogout = async () => {
     await logout();
-    navigate('/login');
+    nav('/');
   };
 
   return (
-    <>
-      <nav className="fixed top-0 left-0 right-0 z-50 bg-white/80 backdrop-blur-xl border-b border-gray-100/80 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6">
-          <div className="flex items-center justify-between h-16">
-            {/* Logo */}
-            <Link to="/dashboard" className="flex items-center gap-2.5 group">
-              <span className="text-2xl group-hover:animate-bounce-gentle">📚</span>
-              <span className="text-xl font-bold gradient-text hidden sm:block">LearnFlow</span>
-            </Link>
+    <nav className="sticky top-0 z-40 backdrop-blur-xl bg-white/70 border-b border-white/60">
+      <div className="container-page py-3 flex items-center gap-4">
+        <Link to="/dashboard" className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-peach-400 flex items-center justify-center text-white text-lg">
+            📚
+          </div>
+          <span className="font-display font-bold text-lg text-ink">LearnFlow</span>
+        </Link>
 
-            {/* Desktop nav */}
-            <div className="hidden md:flex items-center gap-1">
-              {navItems.map((item) => {
-                const active = location.pathname === item.path;
-                const Icon = item.icon;
-                return (
-                  <Link
-                    key={item.path}
-                    to={item.path}
-                    className={`relative flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 ${
-                      active
-                        ? 'text-primary-600'
-                        : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
-                    }`}
-                  >
-                    <Icon size={18} />
-                    <span>{item.label}</span>
-                    {active && (
-                      <motion.div
-                        layoutId="navbar-indicator"
-                        className="absolute inset-0 bg-primary-50 rounded-xl border border-primary-200/50"
-                        style={{ zIndex: -1 }}
-                        transition={{ type: 'spring', stiffness: 350, damping: 30 }}
-                      />
-                    )}
-                  </Link>
-                );
-              })}
-            </div>
-
-            {/* User section */}
-            <div className="flex items-center gap-3">
-              <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary-50 text-primary-600 text-sm font-medium">
-                <div className="w-6 h-6 rounded-full bg-primary-200 flex items-center justify-center text-xs font-bold text-primary-700">
-                  {user?.username?.[0]?.toUpperCase() || 'U'}
-                </div>
-                <span className="max-w-[100px] truncate">{user?.username}</span>
-              </div>
-              <button
-                onClick={handleLogout}
-                className="hidden md:flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-red-500 hover:bg-red-50 transition-all"
+        <div className="hidden md:flex items-center gap-1 ml-4">
+          {links.map(l => {
+            const active = loc.pathname === l.to;
+            return (
+              <Link
+                key={l.to}
+                to={l.to}
+                className={`px-3 py-1.5 rounded-lg text-sm transition ${
+                  active
+                    ? 'bg-indigo-100 text-indigo-700 font-semibold'
+                    : 'text-ink-soft hover:bg-white hover:text-ink'
+                }`}
               >
-                <FiLogOut size={16} />
-                <span>Logout</span>
-              </button>
+                {l.label}
+              </Link>
+            );
+          })}
+        </div>
 
-              {/* Mobile menu toggle */}
-              <button
-                onClick={() => setMobileOpen(!mobileOpen)}
-                className="md:hidden p-2 rounded-xl text-gray-600 hover:bg-gray-100 transition"
+        <div className="flex-1" />
+
+        <PremiumBadge premium={premium} />
+
+        <div className="hidden md:flex items-center gap-2">
+          <Link to="/profile" className="btn-secondary !py-1.5 !px-3 text-sm">
+            👤 {user?.username}
+          </Link>
+          <button onClick={handleLogout} className="btn-ghost !py-1.5 !px-3 text-sm">
+            Logout
+          </button>
+        </div>
+
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="md:hidden btn-ghost !p-2"
+          aria-label="Menu"
+        >
+          ☰
+        </button>
+      </div>
+
+      {open && (
+        <div className="md:hidden border-t border-white/60 bg-white/90 backdrop-blur-xl animate-fade-in">
+          <div className="container-page py-2 flex flex-col">
+            {links.map(l => (
+              <Link
+                key={l.to}
+                to={l.to}
+                onClick={() => setOpen(false)}
+                className="py-2 text-sm text-ink-soft hover:text-ink"
               >
-                {mobileOpen ? <FiX size={22} /> : <FiMenu size={22} />}
-              </button>
-            </div>
+                {l.label}
+              </Link>
+            ))}
+            <Link to="/profile" onClick={() => setOpen(false)} className="py-2 text-sm">👤 Profile</Link>
+            <button onClick={handleLogout} className="py-2 text-sm text-left text-rose-600">Logout</button>
           </div>
         </div>
-      </nav>
-
-      {/* Mobile menu */}
-      <AnimatePresence>
-        {mobileOpen && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.2 }}
-            className="fixed inset-x-0 top-16 z-40 md:hidden bg-white/95 backdrop-blur-xl border-b border-gray-100 shadow-lg"
-          >
-            <div className="px-4 py-3 space-y-1">
-              {navItems.map((item) => {
-                const active = location.pathname === item.path;
-                const Icon = item.icon;
-                return (
-                  <Link
-                    key={item.path}
-                    to={item.path}
-                    onClick={() => setMobileOpen(false)}
-                    className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${
-                      active
-                        ? 'bg-primary-50 text-primary-600 border border-primary-200/50'
-                        : 'text-gray-600 hover:bg-gray-50'
-                    }`}
-                  >
-                    <Icon size={20} />
-                    <span>{item.label}</span>
-                  </Link>
-                );
-              })}
-              <hr className="my-2 border-gray-100" />
-              <button
-                onClick={() => { handleLogout(); setMobileOpen(false); }}
-                className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-red-500 hover:bg-red-50 w-full transition-all"
-              >
-                <FiLogOut size={20} />
-                <span>Logout</span>
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </>
+      )}
+    </nav>
   );
 }

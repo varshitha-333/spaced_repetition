@@ -1,464 +1,331 @@
-import { useState, useEffect, useMemo } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useEffect, useState, useCallback } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { useAuth } from '../hooks/useAuth';
-import {
-  getRevisionStats,
-  connectDrive,
-  disconnectDrive,
-  saveNotificationPreferences,
-} from '../utils/api';
-import StatsCard from '../components/StatsCard';
 import toast from 'react-hot-toast';
 import {
-  FiUpload,
-  FiCalendar,
-  FiClock,
-  FiCheckCircle,
-  FiAlertTriangle,
-  FiLink,
-  FiLink2,
-  FiSmartphone,
-  FiArrowRight,
-  FiZap,
-  FiCloud,
-  FiShield,
-  FiStar,
-  FiTrendingUp,
-} from 'react-icons/fi';
+  getTodayRevisions, getOverdueRevisions, getRevisionStats,
+  completeRevision, postponeRevision,
+  getPremiumStatus, enableSms, aiStreakCoach,
+} from '../services/api';
+import { useAuth } from '../hooks/useAuth';
+import Navbar from '../components/Navbar';
 
-const planTiers = [
-  {
-    name: 'Free',
-    price: '₹0',
-    subtitle: 'For students building a habit',
-    accent: 'from-slate-500 to-slate-700',
-    border: 'border-slate-200',
-    features: ['Core spaced repetition flow', 'Manual daily review tracking', 'Basic upload + AI title generation'],
-  },
-  {
-    name: 'Core',
-    price: '₹199/mo',
-    subtitle: 'For consistent learners',
-    accent: 'from-primary-500 to-primary-700',
-    border: 'border-primary-300',
-    featured: true,
-    features: ['Morning SMS reminders at 8 AM', 'Google Drive sync visibility', 'Upcoming review management with calmer UI'],
-  },
-  {
-    name: 'Premium',
-    price: '₹499/mo',
-    subtitle: 'For exam season and heavy workloads',
-    accent: 'from-amber-400 to-orange-500',
-    border: 'border-amber-200',
-    features: ['Priority nudges for overdue revisions', 'Advanced analytics + streak coaching', 'Future scope for smart AI study concierge'],
-  },
-];
+const tone = (n) => n === 0 ? 'sage' : n < 3 ? 'indigo' : 'peach';
 
 export default function Dashboard() {
-  const { user, checkAuth } = useAuth();
+  const { user, refreshUser } = useAuth();
+  const nav = useNavigate();
+
+  const [today, setToday] = useState([]);
+  const [overdue, setOverdue] = useState([]);
   const [stats, setStats] = useState(null);
+  const [premium, setPremium] = useState(null);
+  const [coachMsg, setCoachMsg] = useState('');
+  const [busy, setBusy] = useState(null);
+  const [showSms, setShowSms] = useState(false);
+  const [smsPhone, setSmsPhone] = useState(user?.notification_phone || '');
   const [loading, setLoading] = useState(true);
-  const [savingNotification, setSavingNotification] = useState(false);
-  const [searchParams] = useSearchParams();
-  const browserTimezone = useMemo(
-    () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-    []
-  );
-  const [notificationPhone, setNotificationPhone] = useState('');
-  const [notificationEnabled, setNotificationEnabled] = useState(false);
 
-  useEffect(() => {
-    fetchStats();
-    const driveStatus = searchParams.get('drive');
-    const loginStatus = searchParams.get('login');
-
-    if (driveStatus === 'connected') {
-      toast.success('Google Drive connected!');
-      checkAuth();
-    }
-    if (driveStatus === 'error') toast.error('Drive connection failed');
-    if (loginStatus === 'success') {
-      toast.success('Welcome!');
-      checkAuth();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    setNotificationPhone(user?.notification_phone || '');
-    setNotificationEnabled(Boolean(user?.sms_notifications_enabled));
-  }, [user]);
-
-  const fetchStats = async () => {
+  const load = useCallback(async () => {
     try {
-      const res = await getRevisionStats();
-      setStats(res.data);
-    } catch {
-      toast.error('Failed to load stats');
+      const [t, o, s, p] = await Promise.all([
+        getTodayRevisions(), getOverdueRevisions(), getRevisionStats(), getPremiumStatus(),
+      ]);
+      setToday(t.data?.revisions || []);
+      setOverdue(o.data?.revisions || []);
+      setStats(s.data || null);
+      setPremium(p.data);
+    } catch (e) {
+      // silent
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const handleConnectDrive = async () => {
+  useEffect(() => { load(); }, [load]);
+
+  // Streak coach (premium-only) — fetch a Gemini-written line once data is ready
+  useEffect(() => {
+    if (!premium?.is_premium || !stats) return;
+    aiStreakCoach({
+      streak: stats.current_streak || 0,
+      done_today: stats.completed_today || 0,
+      due_today: today.length,
+    }).then(r => setCoachMsg(r.data?.message || '')).catch(() => {});
+  }, [premium, stats, today.length]);
+
+  const handleComplete = async (id) => {
+    setBusy(id);
     try {
-      const res = await connectDrive();
-      window.location.href = res.data.auth_url;
-    } catch {
-      toast.error('Could not connect Drive');
-    }
+      await completeRevision(id);
+      toast.success('Nice — locked in. 🎯');
+      load();
+    } catch { toast.error('Could not save'); }
+    finally { setBusy(null); }
   };
-
-  const handleChangeDrive = async () => {
+  const handlePostpone = async (id) => {
+    setBusy(id);
     try {
-      const res = await connectDrive();
-      window.location.href = res.data.auth_url;
-    } catch {
-      toast.error('Could not re-connect Drive');
-    }
+      await postponeRevision(id);
+      toast('Pushed to tomorrow', { icon: '⏭️' });
+      load();
+    } catch { toast.error('Could not postpone'); }
+    finally { setBusy(null); }
   };
 
-  const handleDisconnectDrive = async () => {
+  const handleEnableSms = async () => {
+    if (!smsPhone.trim()) { toast.error('Enter your phone number'); return; }
     try {
-      await disconnectDrive();
-      toast.success('Drive disconnected');
-      checkAuth();
-    } catch {
-      toast.error('Failed to disconnect');
-    }
+      const r = await enableSms(smsPhone.trim(), true);
+      toast.success(r.data.sms?.mode === 'real' ? 'SMS reminders enabled!' : 'Enabled (mock — set Twilio env vars for real SMS)');
+      setShowSms(false);
+      refreshUser();
+    } catch (e) { toast.error(e.response?.data?.error || 'Failed'); }
   };
 
-  const handleSaveNotifications = async () => {
-    setSavingNotification(true);
-    try {
-      await saveNotificationPreferences({
-        enabled: notificationEnabled,
-        phone_number: notificationPhone,
-        timezone: browserTimezone,
-        notification_hour: 8,
-      });
-      await checkAuth();
-      toast.success(notificationEnabled ? 'Morning SMS reminders enabled' : 'Morning SMS reminders updated');
-    } catch (err) {
-      toast.error(err.response?.data?.error || 'Could not save SMS settings');
-    } finally {
-      setSavingNotification(false);
-    }
-  };
-
-  const greeting = () => {
-    const h = new Date().getHours();
-    if (h < 12) return 'Good Morning';
-    if (h < 17) return 'Good Afternoon';
-    return 'Good Evening';
-  };
-
-  const dueLogicLabels = stats?.due_logic?.labels || ['Day 1', 'Day 3', 'Day 6', 'Day 29', 'Day 179'];
-  const driveConnected = Boolean(user?.drive_connected);
-  const twilioReady = Boolean(user?.twilio_configured);
+  const driveConnected = !!user?.drive_connected;
+  const totalDue = today.length + overdue.length;
+  const allDone = !loading && totalDue === 0;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="mb-8"
-      >
-        <div className="rounded-[28px] overflow-hidden border border-white/60 bg-white/70 backdrop-blur-xl shadow-soft">
-          <div className="bg-gradient-to-r from-primary-600 via-primary-500 to-accent-500 p-[1px]">
-            <div className="bg-gradient-to-br from-slate-950 via-primary-950 to-slate-900 rounded-[27px] text-white px-6 sm:px-8 py-7 sm:py-9">
-              <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-6">
-                <div className="max-w-2xl">
-                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 text-white/85 text-xs font-semibold mb-4">
-                    <FiZap size={14} /> Smart spaced repetition for students
-                  </div>
-                  <h1 className="text-3xl sm:text-4xl font-extrabold leading-tight mb-2">
-                    {greeting()}, {user?.username}! Let&apos;s make today&apos;s revision lighter.
-                  </h1>
-                  <p className="text-white/75 text-sm sm:text-base max-w-xl">
-                    LearnFlow now surfaces clear drive status, calmer upcoming tasks, and optional Twilio-powered morning reminders with motivational quotes.
-                  </p>
-                </div>
-                <div className="grid grid-cols-2 gap-3 sm:min-w-[320px]">
-                  <Link to="/upload" className="rounded-2xl bg-white text-slate-900 px-4 py-4 font-semibold flex items-center justify-between hover:-translate-y-0.5 transition-all">
-                    <span className="flex items-center gap-2"><FiUpload size={18} /> Add material</span>
-                    <FiArrowRight />
-                  </Link>
-                  <Link to="/today" className="rounded-2xl bg-white/10 border border-white/15 px-4 py-4 font-semibold flex items-center justify-between hover:bg-white/15 transition-all">
-                    <span className="flex items-center gap-2"><FiCalendar size={18} /> Today&apos;s queue</span>
-                    <FiArrowRight />
-                  </Link>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </motion.div>
+    <div className="min-h-screen">
+      <Navbar />
 
-      {loading ? (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="glass-card p-5 animate-pulse">
-              <div className="h-12 w-12 bg-gray-200 rounded-2xl mb-3" />
-              <div className="h-6 w-16 bg-gray-200 rounded mb-2" />
-              <div className="h-4 w-24 bg-gray-100 rounded" />
-            </div>
-          ))}
+      {/* ─────────── Premium ribbon ─────────── */}
+      {premium && !premium.is_premium && premium.campaign_active && (
+        <div className="bg-gradient-to-r from-indigo-600 via-indigo-500 to-peach-500 text-white text-sm py-2 px-4 text-center">
+          🎁 Launch offer · Premium is <b>FREE for 30 days</b>.{' '}
+          <Link to="/pricing" className="underline font-semibold ml-1">Claim now →</Link>
         </div>
-      ) : stats && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          <StatsCard icon="📅" label="Due Today" value={stats.today} color="primary" delay={0.1} subtitle="Needs attention now" />
-          <StatsCard icon="⚠️" label="Overdue" value={stats.overdue} color={stats.overdue > 0 ? 'danger' : 'success'} delay={0.2} subtitle="Carry-forward items" />
-          <StatsCard icon="✅" label="Completed Today" value={stats.completed_today} color="success" delay={0.3} subtitle="Progress already made" />
-          <StatsCard icon="🔥" label="Current Streak" value={`${stats.streak} day${stats.streak !== 1 ? 's' : ''}`} color="warning" delay={0.4} subtitle="Protect it today" />
+      )}
+      {premium?.is_premium && (
+        <div className="bg-emerald-50 border-b border-emerald-100 text-emerald-800 text-sm py-2 px-4 text-center">
+          ✨ You're on Premium · {premium.days_left} days left ·{' '}
+          <Link to="/premium" className="underline font-semibold">Open AI Lab →</Link>
         </div>
       )}
 
-      <div className="grid xl:grid-cols-[1.1fr_0.9fr] gap-6 mb-8">
+      <div className="container-page py-8">
+        {/* ─────────── Heading + Streak ─────────── */}
         <motion.div
-          initial={{ opacity: 0, x: -20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ delay: 0.2 }}
-          className="space-y-6"
+          initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+          className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-8"
         >
-          <div className="glass-card p-6">
-            <div className="flex items-center justify-between gap-4 mb-5">
-              <div>
-                <h2 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-                  <FiCloud className="text-primary-600" /> Google Drive status
-                </h2>
-                <p className="text-sm text-gray-500 mt-1">A clearer connected status so you can trust your backup flow.</p>
-              </div>
-              <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold ${driveConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'}`}>
-                <span className={`w-2 h-2 rounded-full ${driveConnected ? 'bg-emerald-500' : 'bg-gray-400'}`} />
-                {driveConnected ? 'Drive connected' : 'Drive not connected'}
-              </span>
-            </div>
-
-            {driveConnected ? (
-              <div className="space-y-4">
-                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-                  <div className="flex items-start gap-3">
-                    <div className="w-11 h-11 rounded-2xl bg-emerald-100 flex items-center justify-center shrink-0">
-                      <FiCheckCircle className="text-emerald-600" size={22} />
-                    </div>
-                    <div>
-                      <p className="font-semibold text-emerald-700">Connection verified</p>
-                      <p className="text-sm text-emerald-600 mt-1">
-                        LearnFlow can store synced file links and keep your uploaded study material accessible from your dashboard.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-3">
-                  <button onClick={handleChangeDrive} className="btn-secondary text-sm flex items-center gap-2">
-                    <FiLink2 size={14} /> Change account
-                  </button>
-                  <button onClick={handleDisconnectDrive} className="text-sm text-red-500 hover:text-red-600 font-medium hover:underline">
-                    Disconnect drive
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <div className="rounded-2xl border border-dashed border-primary-200 bg-primary-50/70 p-4 text-sm text-gray-600">
-                  Connect Google Drive if you want an extra storage layer for uploaded documents and easier access to your learning links.
-                </div>
-                <button onClick={handleConnectDrive} className="btn-secondary w-full sm:w-auto flex items-center justify-center gap-2 text-sm">
-                  <FiLink2 size={16} /> Connect Google Drive
-                </button>
+          <div>
+            <div className="text-sm text-ink-muted">Good {greet()}, {user?.username || 'student'} 👋</div>
+            <h1 className="font-display text-3xl sm:text-4xl font-bold">
+              {allDone ? "You're all caught up." : `Let's do today's ${totalDue} revisions.`}
+            </h1>
+            {coachMsg && (
+              <div className="mt-2 text-sm text-indigo-700 bg-indigo-50/70 inline-block px-3 py-1.5 rounded-lg">
+                💬 {coachMsg}
               </div>
             )}
           </div>
+          <div className="flex gap-3">
+            <Stat label="Streak" value={`${stats?.current_streak || 0}🔥`} tone="peach" />
+            <Stat label="Done today" value={stats?.completed_today ?? 0} tone="sage" />
+            <Stat label="Saved" value={stats?.total_learnings ?? 0} tone="indigo" />
+          </div>
+        </motion.div>
 
-          <div className="glass-card p-6">
-            <div className="flex items-start justify-between gap-4 mb-5">
-              <div>
-                <h2 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-                  <FiTrendingUp className="text-primary-600" /> Meaningful due logic
-                </h2>
-                <p className="text-sm text-gray-500 mt-1">
-                  Designed around spaced repetition so difficult memories come back before they fade.
-                </p>
-              </div>
-              <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary-50 text-primary-600 text-xs font-semibold">
-                <FiShield size={14} /> Memory-first schedule
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2 mb-4">
-              {dueLogicLabels.map((label) => (
-                <span key={label} className="px-3 py-2 rounded-xl bg-primary-50 text-primary-700 text-sm font-semibold border border-primary-100">
-                  {label}
-                </span>
+        {/* ─────────── Today's focus ─────────── */}
+        <section className="mb-8">
+          <SectionHeader title="Today's revisions" badge={`${today.length}`} tone={tone(today.length)} action={<Link to="/today" className="btn-ghost text-sm">See full focus mode →</Link>} />
+          {loading ? <SkeletonRows /> : today.length === 0 ? (
+            <EmptyToday />
+          ) : (
+            <div className="grid md:grid-cols-2 gap-3">
+              {today.slice(0, 6).map(r => (
+                <RevisionCard key={r.id} r={r} onDone={() => handleComplete(r.id)} onLater={() => handlePostpone(r.id)} busy={busy === r.id} />
               ))}
             </div>
+          )}
+        </section>
 
-            <div className="grid sm:grid-cols-3 gap-3 text-sm">
-              <div className="rounded-2xl bg-slate-50 border border-slate-100 p-4">
-                <p className="font-semibold text-gray-800 mb-1">When a topic is added</p>
-                <p className="text-gray-500">The app schedules reviews for Day 1, 3, 6, 29 and 179 to reinforce memory over short and long gaps.</p>
-              </div>
-              <div className="rounded-2xl bg-amber-50 border border-amber-100 p-4">
-                <p className="font-semibold text-gray-800 mb-1">If you miss a day</p>
-                <p className="text-gray-500">The task becomes overdue and stays visible until you finish it, so weak recall doesn&apos;t silently disappear.</p>
-              </div>
-              <div className="rounded-2xl bg-emerald-50 border border-emerald-100 p-4">
-                <p className="font-semibold text-gray-800 mb-1">Why the streak matters</p>
-                <p className="text-gray-500">When all due work is cleared, your streak grows. That rewards consistency, not random cramming.</p>
-              </div>
+        {/* ─────────── Overdue ─────────── */}
+        {overdue.length > 0 && (
+          <section className="mb-8">
+            <SectionHeader title="Catching up" badge={`${overdue.length} overdue`} tone="peach" />
+            <div className="grid md:grid-cols-2 gap-3">
+              {overdue.slice(0, 4).map(r => (
+                <RevisionCard key={r.id} r={r} overdue onDone={() => handleComplete(r.id)} onLater={() => handlePostpone(r.id)} busy={busy === r.id} />
+              ))}
             </div>
-          </div>
-        </motion.div>
+          </section>
+        )}
 
-        <motion.div
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ delay: 0.25 }}
-          className="space-y-6"
-        >
-          <div className="glass-card p-6">
-            <div className="flex items-start justify-between gap-4 mb-5">
+        {/* ─────────── Quick actions ─────────── */}
+        <section className="grid md:grid-cols-3 gap-4 mb-8">
+          <QuickCard
+            tone="indigo" icon="📥"
+            title="Add a new resource"
+            desc="PDF, link, or pasted notes. AI titles it for you."
+            cta="Add now"
+            onClick={() => nav('/upload')}
+          />
+          <QuickCard
+            tone="peach" icon="📱"
+            title="Enable SMS reminders"
+            desc="One number, two friendly nudges per day. 8 AM + 9 PM."
+            cta={user?.sms_notifications_enabled ? 'Manage' : 'Turn on'}
+            onClick={() => setShowSms(true)}
+          />
+          <QuickCard
+            tone="sage" icon={driveConnected ? '✅' : '🔗'}
+            title={driveConnected ? 'Google Drive connected' : 'Connect Google Drive'}
+            desc={driveConnected ? 'Your uploads sync to your own Drive automatically.' : 'Sync your resources to your own Drive folder.'}
+            cta={driveConnected ? 'Manage' : 'Connect'}
+            onClick={() => nav('/profile')}
+          />
+        </section>
+
+        {/* ─────────── Premium teaser (only if not premium) ─────────── */}
+        {!premium?.is_premium && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }}
+            className="premium-ribbon rounded-2xl p-6 sm:p-8 text-white relative overflow-hidden"
+          >
+            <div className="absolute -top-10 -right-10 w-40 h-40 rounded-full bg-white/10" />
+            <div className="grid md:grid-cols-2 gap-4 items-center relative">
               <div>
-                <h2 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-                  <FiSmartphone className="text-primary-600" /> 8 AM Twilio reminder
-                </h2>
-                <p className="text-sm text-gray-500 mt-1">
-                  Uses your existing username, includes today&apos;s revision links, overdue carry-forward, streak, and a different motivation quote each day.
+                <div className="pill bg-white/20 text-white mb-2">🎁 Premium · 30 days FREE</div>
+                <h3 className="text-2xl font-display font-bold mb-2">Unlock AI summaries, flashcards & quizzes</h3>
+                <p className="opacity-90 text-sm">
+                  Use code <code className="bg-white/20 px-1.5 py-0.5 rounded">LAUNCH30</code> at checkout — total today is ₹0.
                 </p>
               </div>
-              <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold ${twilioReady ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                {twilioReady ? 'Twilio ready' : 'Twilio env pending'}
-              </span>
-            </div>
-
-            <div className="space-y-4">
-              <label className="flex items-start gap-3 rounded-2xl border border-gray-200 bg-white/70 px-4 py-4 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={notificationEnabled}
-                  onChange={(e) => setNotificationEnabled(e.target.checked)}
-                  className="mt-1 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                />
-                <div>
-                  <p className="font-semibold text-gray-800">Send morning revision SMS</p>
-                  <p className="text-sm text-gray-500 mt-1">
-                    Daily delivery at 8:00 AM in your browser timezone: <span className="font-medium text-gray-700">{browserTimezone}</span>
-                  </p>
-                </div>
-              </label>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Phone number in international format</label>
-                <input
-                  type="tel"
-                  value={notificationPhone}
-                  onChange={(e) => setNotificationPhone(e.target.value)}
-                  className="input-field"
-                  placeholder="+14155550100 or +919876543210"
-                />
-                <p className="text-xs text-gray-400 mt-2">
-                  Example: include country code. Your LearnFlow username is automatically used in the message greeting.
-                </p>
-              </div>
-
-              <div className="rounded-2xl bg-slate-50 border border-slate-100 p-4 text-sm text-gray-600 space-y-2">
-                <p className="font-semibold text-gray-800">Message includes</p>
-                <ul className="space-y-1.5 list-disc pl-5">
-                  <li>all revision links due today</li>
-                  <li>carry-forward items from previous days</li>
-                  <li>your current streak and a fresh quote</li>
-                </ul>
-              </div>
-
-              <button onClick={handleSaveNotifications} disabled={savingNotification} className="btn-primary w-full flex items-center justify-center gap-2 text-sm">
-                {savingNotification ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <><FiSmartphone size={16} /> Save SMS settings</>}
-              </button>
-
-              {!twilioReady && (
-                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700">
-                  Add Twilio and notification environment variables in Render before enabling this for production.
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="glass-card p-6">
-            <div className="flex items-center justify-between gap-4 mb-4">
-              <div>
-                <h2 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-                  <FiClock className="text-primary-600" /> Coming up
-                </h2>
-                <p className="text-sm text-gray-500 mt-1">A calmer preview before you open the full upcoming page.</p>
-              </div>
-              <Link to="/upcoming" className="text-sm text-primary-600 font-semibold hover:underline">
-                Open upcoming →
-              </Link>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-2xl bg-blue-50 border border-blue-100 p-4">
-                <p className="text-xs uppercase tracking-wide text-blue-500 font-semibold mb-2">Tomorrow</p>
-                <p className="text-2xl font-bold text-blue-700">{stats?.tomorrow || 0}</p>
-                <p className="text-sm text-blue-600 mt-1">scheduled revisions</p>
-              </div>
-              <div className="rounded-2xl bg-purple-50 border border-purple-100 p-4">
-                <p className="text-xs uppercase tracking-wide text-purple-500 font-semibold mb-2">Later queue</p>
-                <p className="text-2xl font-bold text-purple-700">{stats?.future || 0}</p>
-                <p className="text-sm text-purple-600 mt-1">future tasks</p>
+              <div className="flex md:justify-end">
+                <Link to="/payment" className="bg-white text-indigo-700 font-semibold rounded-xl px-5 py-2.5 hover:bg-white/95 shadow-lift">
+                  Claim Premium →
+                </Link>
               </div>
             </div>
-          </div>
-        </motion.div>
+          </motion.div>
+        )}
       </div>
 
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.35 }}
-        className="mb-8"
-      >
-        <div className="flex items-end justify-between gap-4 mb-4">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
-              <FiStar className="text-accent-500" /> Student SaaS tiers
-            </h2>
-            <p className="text-sm text-gray-500 mt-1">You asked for Free, Core, and Premium positioning. This section shows the product differentiation in the UI.</p>
-          </div>
-        </div>
-
-        <div className="grid lg:grid-cols-3 gap-4">
-          {planTiers.map((tier, idx) => (
-            <motion.div
-              key={tier.name}
-              initial={{ opacity: 0, y: 18 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.1 * idx }}
-              className={`relative rounded-[26px] border ${tier.border} bg-white/80 backdrop-blur-xl p-6 shadow-soft ${tier.featured ? 'ring-2 ring-primary-200' : ''}`}
-            >
-              {tier.featured && (
-                <span className="absolute -top-3 left-6 px-3 py-1 rounded-full text-xs font-bold bg-primary-600 text-white shadow-lg">
-                  Best for most students
-                </span>
-              )}
-              <div className={`inline-flex rounded-2xl px-3 py-2 text-white bg-gradient-to-r ${tier.accent} text-sm font-bold mb-4`}>
-                {tier.name}
+      {/* ─────────── SMS modal ─────────── */}
+      {showSms && (
+        <div className="fixed inset-0 z-50 bg-ink/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+            className="card p-6 max-w-md w-full"
+          >
+            <div className="text-2xl mb-2">📱</div>
+            <h3 className="font-display text-xl font-bold mb-1">Enable SMS reminders</h3>
+            <p className="text-sm text-ink-muted mb-4">
+              You'll get a calm nudge at <b>8 AM</b> with what to revise, and a quick recap at <b>9 PM</b>.
+            </p>
+            <input
+              className="input mb-4" placeholder="+91 9876543210" value={smsPhone}
+              onChange={e => setSmsPhone(e.target.value)}
+            />
+            {!user?.twilio_configured && (
+              <div className="text-xs text-amber-700 bg-amber-50 rounded-lg p-2 mb-3">
+                Twilio env vars not set on server — SMS will run in mock mode (logged to console).
               </div>
-              <h3 className="text-2xl font-bold text-gray-900">{tier.price}</h3>
-              <p className="text-sm text-gray-500 mt-1 mb-5">{tier.subtitle}</p>
-              <div className="space-y-3">
-                {tier.features.map((feature) => (
-                  <div key={feature} className="flex items-start gap-3 text-sm text-gray-700">
-                    <span className="mt-0.5 w-5 h-5 rounded-full bg-primary-50 text-primary-600 flex items-center justify-center shrink-0">✓</span>
-                    <span>{feature}</span>
-                  </div>
-                ))}
-              </div>
-            </motion.div>
-          ))}
+            )}
+            <div className="flex gap-2">
+              <button onClick={() => setShowSms(false)} className="btn-secondary flex-1">Cancel</button>
+              <button onClick={handleEnableSms} className="btn-primary flex-1">Turn on</button>
+            </div>
+          </motion.div>
         </div>
-      </motion.div>
+      )}
     </div>
+  );
+}
+
+/* ─────────── small helpers ─────────── */
+function greet() {
+  const h = new Date().getHours();
+  if (h < 12) return 'morning'; if (h < 18) return 'afternoon'; return 'evening';
+}
+
+function Stat({ label, value, tone }) {
+  const bg = tone === 'peach' ? 'bg-peach-100 text-peach-600'
+    : tone === 'sage' ? 'bg-emerald-100 text-emerald-700'
+    : 'bg-indigo-100 text-indigo-700';
+  return (
+    <div className="card px-4 py-3 min-w-[110px]">
+      <div className="text-xs text-ink-muted">{label}</div>
+      <div className={`text-xl font-bold ${bg.split(' ')[1]}`}>{value}</div>
+    </div>
+  );
+}
+
+function SectionHeader({ title, badge, tone = 'indigo', action }) {
+  const cls = tone === 'peach' ? 'pill-peach' : tone === 'sage' ? 'pill-sage' : 'pill-indigo';
+  return (
+    <div className="flex items-center mb-3">
+      <h2 className="font-display text-xl font-semibold">{title}</h2>
+      {badge && <span className={`${cls} ml-3`}>{badge}</span>}
+      <div className="flex-1" />
+      {action}
+    </div>
+  );
+}
+
+function SkeletonRows() {
+  return (
+    <div className="grid md:grid-cols-2 gap-3">
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div key={i} className="card p-5 space-y-2">
+          <div className="shimmer h-4 w-3/4" />
+          <div className="shimmer h-3 w-1/2" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EmptyToday() {
+  return (
+    <div className="card p-8 text-center">
+      <div className="text-4xl mb-2">🌿</div>
+      <div className="font-semibold mb-1">Nothing due right now.</div>
+      <div className="text-sm text-ink-muted">Add a new resource — your future self will thank you.</div>
+      <Link to="/upload" className="btn-primary mt-4 inline-flex">+ Add resource</Link>
+    </div>
+  );
+}
+
+function RevisionCard({ r, overdue, onDone, onLater, busy }) {
+  return (
+    <div className={`card p-4 card-hover ${overdue ? 'border-peach-200/80 bg-peach-50/40' : ''}`}>
+      <div className="flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className={overdue ? 'pill-peach' : 'pill-indigo'}>
+              {overdue ? 'Overdue' : `Day ${r.day_number || ''}`}
+            </span>
+            {r.url && <a href={r.url} target="_blank" rel="noreferrer" className="text-xs text-indigo-600 hover:underline truncate">open ↗</a>}
+          </div>
+          <div className="font-semibold text-ink truncate">{r.heading || r.title || 'Untitled'}</div>
+          {r.description && <div className="text-sm text-ink-muted line-clamp-2 mt-1">{r.description}</div>}
+        </div>
+      </div>
+      <div className="flex gap-2 mt-3">
+        <button disabled={busy} onClick={onDone} className="btn-primary flex-1 !py-2 text-sm">
+          {busy ? '…' : '✓ Done'}
+        </button>
+        <button disabled={busy} onClick={onLater} className="btn-secondary !py-2 text-sm">Later</button>
+      </div>
+    </div>
+  );
+}
+
+function QuickCard({ tone, icon, title, desc, cta, onClick }) {
+  const bg = tone === 'peach' ? 'from-peach-50 to-cream-50'
+    : tone === 'sage' ? 'from-emerald-50 to-cream-50'
+    : 'from-indigo-50 to-cream-50';
+  return (
+    <button onClick={onClick} className={`text-left card card-hover p-5 bg-gradient-to-br ${bg}`}>
+      <div className="text-2xl mb-2">{icon}</div>
+      <div className="font-semibold mb-1">{title}</div>
+      <div className="text-sm text-ink-muted mb-3">{desc}</div>
+      <span className="text-sm font-semibold text-indigo-700">{cta} →</span>
+    </button>
   );
 }

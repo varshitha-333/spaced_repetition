@@ -1,159 +1,107 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import { motion } from 'framer-motion';
 import { useAuth } from '../hooks/useAuth';
-import { getGoogleAuthUrl } from '../utils/api';
-import toast from 'react-hot-toast';
-import { FiUser, FiMail, FiLock, FiArrowRight } from 'react-icons/fi';
-import { FcGoogle } from 'react-icons/fc';
+import { getGoogleAuthUrl } from '../services/api';
 
 export default function Register() {
-  const [username, setUsername] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [loading, setLoading] = useState(false);
-  const { register, checkAuth } = useAuth();
-  const navigate = useNavigate();
+  const { register } = useAuth();
+  const nav = useNavigate();
+  const [form, setForm] = useState({ username: '', email: '', password: '' });
+  const [busy, setBusy] = useState(false);
 
-  const handleSubmit = async (e) => {
+  const submit = async (e) => {
     e.preventDefault();
-    if (!username || !email || !password) {
-      toast.error('All fields are required');
-      return;
-    }
-    if (password !== confirmPassword) {
-      toast.error('Passwords do not match');
-      return;
-    }
-    if (password.length < 6) {
-      toast.error('Password must be at least 6 characters');
-      return;
-    }
-    setLoading(true);
+    if (form.password.length < 6) { toast.error('Password too short'); return; }
+    setBusy(true);
     try {
-      await register(username, password, email);
-      toast.success('Account created! Welcome 🎉');
-      // Backend auto-logs-in after register, so refresh auth + go to dashboard
-      await checkAuth();
-      navigate('/dashboard');
+      await register(form.username, form.password, form.email);
+      toast.success('Welcome to LearnFlow! 🎉');
+      nav('/payment');   // send straight to free-Premium claim
     } catch (err) {
-      // Surface real backend error (helps debugging)
-      const msg = err?.response?.data?.error || err?.message || 'Registration failed';
-      toast.error(msg);
-      console.error('Register error:', err);
-    } finally {
-      setLoading(false);
-    }
+      toast.error(err.response?.data?.error || 'Could not register');
+    } finally { setBusy(false); }
   };
 
-  const handleGoogleSignup = async () => {
+  const google = async () => {
     try {
-      const res = await getGoogleAuthUrl('register');
-      if (res.data?.auth_url && res.data.auth_url !== '#') {
-        window.location.href = res.data.auth_url;
-      } else {
-        toast.error('Google sign-up not configured on backend');
-      }
-    } catch (err) {
-      toast.error(err?.response?.data?.error || 'Google sign-up unavailable');
-    }
+      const r = await getGoogleAuthUrl('register');
+      if (r.data?.url) window.location.href = r.data.url;
+    } catch { toast.error('Google sign-up unavailable'); }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden">
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -left-40 w-80 h-80 bg-accent-200/30 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -right-40 w-80 h-80 bg-primary-200/30 rounded-full blur-3xl" />
-      </div>
-
+    <div className="min-h-screen flex items-center justify-center p-4">
       <motion.div
-        initial={{ opacity: 0, y: 30 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.6 }}
-        className="w-full max-w-md relative z-10"
+        initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
+        className="grid md:grid-cols-2 gap-0 w-full max-w-4xl card overflow-hidden"
       >
-        <div className="text-center mb-8">
-          <motion.div
-            className="text-6xl mb-3 inline-block"
-            animate={{ scale: [1, 1.1, 1] }}
-            transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
-          >
-            🚀
-          </motion.div>
-          <h1 className="text-3xl font-bold gradient-text mb-1">Join LearnFlow</h1>
-          <p className="text-gray-500 text-sm">Start your learning journey today</p>
-        </div>
+        {/* Left: form */}
+        <div className="p-8">
+          <Link to="/" className="flex items-center gap-2 mb-6">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-peach-400 flex items-center justify-center text-white">📚</div>
+            <span className="font-display font-bold text-lg">LearnFlow</span>
+          </Link>
 
-        <div className="glass-card p-8">
-          <h2 className="text-xl font-bold text-gray-800 mb-6 text-center">Create Account</h2>
+          <h1 className="font-display text-2xl font-bold mb-1">Create your account</h1>
+          <p className="text-sm text-ink-muted mb-6">It's free. Premium is on us for 30 days.</p>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={submit} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1.5">Username</label>
-              <div className="relative">
-                <FiUser className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-                <input type="text" value={username} onChange={(e) => setUsername(e.target.value)}
-                  className="input-field pl-11" placeholder="Choose a username" />
-              </div>
+              <div className="label mb-1">Username</div>
+              <input className="input" required value={form.username}
+                onChange={e => setForm({ ...form, username: e.target.value })} />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1.5">Email</label>
-              <div className="relative">
-                <FiMail className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-                  className="input-field pl-11" placeholder="you@email.com" />
-              </div>
+              <div className="label mb-1">Email</div>
+              <input type="email" className="input" required value={form.email}
+                onChange={e => setForm({ ...form, email: e.target.value })} />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1.5">Password</label>
-              <div className="relative">
-                <FiLock className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
-                  className="input-field pl-11" placeholder="Min 6 characters" />
-              </div>
+              <div className="label mb-1">Password</div>
+              <input type="password" className="input" required value={form.password}
+                onChange={e => setForm({ ...form, password: e.target.value })}
+                placeholder="At least 6 characters" />
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1.5">Confirm Password</label>
-              <div className="relative">
-                <FiLock className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-                <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="input-field pl-11" placeholder="Confirm your password" />
-              </div>
-            </div>
-            <button type="submit" disabled={loading} className="btn-primary w-full flex items-center justify-center gap-2">
-              {loading ? (
-                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              ) : (
-                <><span>Create Account</span><FiArrowRight /></>
-              )}
+            <button type="submit" disabled={busy} className="btn-primary w-full !py-3">
+              {busy ? '…' : 'Create account & claim Premium 🎁'}
             </button>
           </form>
 
-          {/* ── divider ── */}
-          <div className="relative my-6">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-gray-200" />
-            </div>
-            <div className="relative flex justify-center">
-              <span className="bg-white px-4 text-sm text-gray-400">or sign up with</span>
-            </div>
+          <div className="my-5 flex items-center gap-3 text-xs text-ink-muted">
+            <div className="flex-1 h-px bg-indigo-100" /> or <div className="flex-1 h-px bg-indigo-100" />
           </div>
 
-          {/* ── Google Sign-Up button (NEW) ── */}
-          <button
-            type="button"
-            onClick={handleGoogleSignup}
-            className="w-full flex items-center justify-center gap-3 px-6 py-3 rounded-xl border-2 border-gray-200 bg-white hover:bg-gray-50 hover:border-gray-300 transition-all duration-300 font-medium text-gray-700"
-          >
-            <FcGoogle size={22} />
-            <span>Sign up with Google</span>
+          <button onClick={google} className="btn-secondary w-full">
+            <span>🅖</span> Continue with Google
           </button>
 
-          <p className="text-center text-sm text-gray-500 mt-6">
-            Already have an account?{' '}
-            <Link to="/login" className="text-primary-600 font-semibold hover:underline">Sign in</Link>
-          </p>
+          <div className="text-center text-sm text-ink-muted mt-6">
+            Already have an account? <Link to="/login" className="text-indigo-600 font-semibold">Sign in</Link>
+          </div>
+        </div>
+
+        {/* Right: promo */}
+        <div className="hidden md:flex flex-col justify-center p-8 premium-ribbon text-white relative overflow-hidden">
+          <div className="absolute -top-10 -right-10 w-44 h-44 rounded-full bg-white/10 animate-float" />
+          <div className="absolute -bottom-10 -left-8 w-40 h-40 rounded-full bg-white/10 animate-float" style={{ animationDelay: '1s' }} />
+          <div className="relative">
+            <div className="pill bg-white/20 text-white mb-3">🎁 Launch offer</div>
+            <h2 className="font-display text-3xl font-bold mb-3 leading-tight">
+              Premium FREE for 30 days
+            </h2>
+            <ul className="space-y-2 text-sm opacity-95">
+              <li>✓ AI Smart Summary</li>
+              <li>✓ AI Flashcards & Quizzes</li>
+              <li>✓ Concept Linker</li>
+              <li>✓ 8 AM + 9 PM SMS reminders</li>
+              <li>✓ Streak coach</li>
+            </ul>
+            <div className="mt-5 text-xs opacity-80">
+              Coupons: LAUNCH30 · STUDENT30 · FIRST100 · LEARNFREE
+            </div>
+          </div>
         </div>
       </motion.div>
     </div>

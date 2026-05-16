@@ -1,145 +1,83 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import { motion } from 'framer-motion';
 import { useAuth } from '../hooks/useAuth';
-import { getGoogleAuthUrl } from '../utils/api';
-import toast from 'react-hot-toast';
-import { FiLock, FiUser, FiArrowRight } from 'react-icons/fi';
-import { FcGoogle } from 'react-icons/fc';
+import { getGoogleAuthUrl } from '../services/api';
 
 export default function Login() {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
   const { login } = useAuth();
-  const navigate = useNavigate();
+  const nav = useNavigate();
+  const [form, setForm] = useState({ username: '', password: '' });
+  const [busy, setBusy] = useState(false);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!username || !password) {
-      toast.error('Please fill in all fields');
-      return;
+  useEffect(() => {
+    if (window.__googleAuthError === 'not_registered') {
+      toast.error('That Google account is not registered yet — please sign up first.');
+      delete window.__googleAuthError;
     }
-    setLoading(true);
+  }, []);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
     try {
-      await login(username, password);
-      toast.success('Welcome back!');
-      navigate('/dashboard');
+      await login(form.username, form.password);
+      toast.success('Welcome back 👋');
+      nav('/dashboard');
     } catch (err) {
       toast.error(err.response?.data?.error || 'Login failed');
-    } finally {
-      setLoading(false);
-    }
+    } finally { setBusy(false); }
   };
 
-  // ── Renamed to "Login with Google" per request ──
-  const handleGoogleLogin = async () => {
+  const google = async () => {
     try {
-      const res = await getGoogleAuthUrl('login');
-      window.location.href = res.data.auth_url;
-    } catch {
-      toast.error('Google login unavailable');
-    }
+      const r = await getGoogleAuthUrl('login');
+      if (r.data?.url) window.location.href = r.data.url;
+    } catch { toast.error('Google login unavailable'); }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden">
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-80 h-80 bg-primary-200/30 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-accent-200/30 rounded-full blur-3xl" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-primary-100/20 rounded-full blur-3xl" />
-      </div>
-
+    <div className="min-h-screen flex items-center justify-center p-4">
       <motion.div
-        initial={{ opacity: 0, y: 30 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.6 }}
-        className="w-full max-w-md relative z-10"
+        initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
+        className="card p-8 w-full max-w-md"
       >
-        <div className="text-center mb-8">
-          <motion.div
-            className="text-6xl mb-3 inline-block"
-            animate={{ rotate: [0, 5, -5, 0] }}
-            transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
-          >
-            📚
-          </motion.div>
-          <h1 className="text-3xl font-bold gradient-text mb-1">LearnFlow</h1>
-          <p className="text-gray-500 text-sm">Smart spaced repetition for students</p>
+        <Link to="/" className="flex items-center gap-2 mb-6">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-peach-400 flex items-center justify-center text-white">📚</div>
+          <span className="font-display font-bold text-lg">LearnFlow</span>
+        </Link>
+
+        <div className="pill-peach mb-3">🎁 Premium is FREE for 30 days</div>
+        <h1 className="font-display text-2xl font-bold mb-1">Welcome back</h1>
+        <p className="text-sm text-ink-muted mb-6">Sign in to pick up where you left off.</p>
+
+        <form onSubmit={submit} className="space-y-4">
+          <div>
+            <div className="label mb-1">Username</div>
+            <input className="input" required value={form.username}
+              onChange={e => setForm({ ...form, username: e.target.value })} />
+          </div>
+          <div>
+            <div className="label mb-1">Password</div>
+            <input type="password" className="input" required value={form.password}
+              onChange={e => setForm({ ...form, password: e.target.value })} />
+          </div>
+          <button type="submit" disabled={busy} className="btn-primary w-full !py-3">
+            {busy ? '…' : 'Sign in'}
+          </button>
+        </form>
+
+        <div className="my-5 flex items-center gap-3 text-xs text-ink-muted">
+          <div className="flex-1 h-px bg-indigo-100" /> or <div className="flex-1 h-px bg-indigo-100" />
         </div>
 
-        <div className="glass-card p-8">
-          <h2 className="text-xl font-bold text-gray-800 mb-6 text-center">Welcome Back</h2>
+        <button onClick={google} className="btn-secondary w-full">
+          <span>🅖</span> Continue with Google
+        </button>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1.5">Username</label>
-              <div className="relative">
-                <FiUser className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  className="input-field pl-11"
-                  placeholder="Enter your username"
-                  autoComplete="username"
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1.5">Password</label>
-              <div className="relative">
-                <FiLock className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="input-field pl-11"
-                  placeholder="Enter your password"
-                  autoComplete="current-password"
-                />
-              </div>
-            </div>
-            <button
-              type="submit"
-              disabled={loading}
-              className="btn-primary w-full flex items-center justify-center gap-2"
-            >
-              {loading ? (
-                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              ) : (
-                <>
-                  <span>Login</span>
-                  <FiArrowRight />
-                </>
-              )}
-            </button>
-          </form>
-
-          <div className="relative my-6">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-gray-200" />
-            </div>
-            <div className="relative flex justify-center">
-              <span className="bg-white px-4 text-sm text-gray-400">or continue with</span>
-            </div>
-          </div>
-
-          {/* ✅ Text changed from "Sign in with Google" to "Login with Google" */}
-          <button
-            onClick={handleGoogleLogin}
-            className="w-full flex items-center justify-center gap-3 px-6 py-3 rounded-xl border-2 border-gray-200 bg-white hover:bg-gray-50 hover:border-gray-300 transition-all duration-300 font-medium text-gray-700"
-          >
-            <FcGoogle size={22} />
-            <span>Login with Google</span>
-          </button>
-
-          <p className="text-center text-sm text-gray-500 mt-6">
-            Don&apos;t have an account?{' '}
-            <Link to="/register" className="text-primary-600 font-semibold hover:underline">
-              Sign up free
-            </Link>
-          </p>
+        <div className="text-center text-sm text-ink-muted mt-6">
+          New here? <Link to="/register" className="text-indigo-600 font-semibold">Create an account</Link>
         </div>
       </motion.div>
     </div>

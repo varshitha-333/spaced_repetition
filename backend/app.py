@@ -100,6 +100,9 @@ NOTIFICATION_QUOTES = [
 ]
 
 app = Flask(__name__)
+from premium_routes import premium_bp, init_premium
+init_premium(app, supabase, logger, decode_token)
+app.register_blueprint(premium_bp)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-to-a-strong-secret-in-production")
 
 # ProxyFix so request.is_secure is correct behind Render's load balancer
