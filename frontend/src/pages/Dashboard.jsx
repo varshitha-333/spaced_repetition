@@ -52,6 +52,17 @@ export default function Dashboard() {
     }
   };
 
+  const handleChangeDrive = async () => {
+    // Re-run the OAuth flow — new credentials overwrite the old ones in Supabase.
+    // Drive stays connected; this just lets the user switch Google accounts.
+    try {
+      const res = await connectDrive();
+      window.location.href = res.data.auth_url;
+    } catch {
+      toast.error('Could not re-connect Drive');
+    }
+  };
+
   const handleDisconnectDrive = async () => {
     try {
       await disconnectDrive();
@@ -182,9 +193,14 @@ export default function Dashboard() {
                   <p className="text-sm text-emerald-600">Files auto-sync to Drive</p>
                 </div>
               </div>
-              <button onClick={handleDisconnectDrive} className="text-sm text-red-500 hover:text-red-600 font-medium hover:underline">
-                Disconnect Drive
-              </button>
+              <div className="flex items-center gap-4">
+                <button onClick={handleChangeDrive} className="btn-secondary text-sm flex items-center gap-2">
+                  <FiLink2 size={14} /> Change Account
+                </button>
+                <button onClick={handleDisconnectDrive} className="text-sm text-red-500 hover:text-red-600 font-medium hover:underline">
+                  Disconnect
+                </button>
+              </div>
             </div>
           ) : (
             <div className="space-y-4">

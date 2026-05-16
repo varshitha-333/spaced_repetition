@@ -222,6 +222,23 @@ def decode_token(token: str) -> dict:
     return pyjwt.decode(token, app.secret_key, algorithms=[JWT_ALGORITHM])
 
 
+# ════════════════════════════════════════════════════════════════
+#  OAUTH STATE HELPERS  (cross-domain safe — no cookies needed)
+# ════════════════════════════════════════════════════════════════
+import base64
+
+def encode_state(data: dict) -> str:
+    """Encode arbitrary dict into a URL-safe base64 string for the OAuth state param."""
+    return base64.urlsafe_b64encode(json.dumps(data).encode()).decode()
+
+def decode_state(state: str) -> dict:
+    """Decode the OAuth state param back to a dict. Returns {} on any error."""
+    try:
+        return json.loads(base64.urlsafe_b64decode(state.encode()).decode())
+    except Exception:
+        return {}
+
+
 # ─── AUTH HELPERS ───
 def login_required(f):
     """
@@ -790,7 +807,7 @@ def api_me():
 def api_google_auth():
     if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET:
         return jsonify({"error": "Google OAuth not configured"}), 503
-    mode = request.args.get("mode", "login")
+    mode = request.args.get("mode", "login")   # "login" or "register"
     flow = Flow.from_client_config({
         "web": {
             "client_id": GOOGLE_OAUTH_CLIENT_ID,
@@ -802,9 +819,17 @@ def api_google_auth():
     }, scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"])
     flow.redirect_uri = GOOGLE_LOGIN_REDIRECT
     logger.info(f"[Google login] Sending redirect_uri to Google: {GOOGLE_LOGIN_REDIRECT}")
-    url, state = flow.authorization_url(access_type="offline", prompt="consent")
-    # Store state in session for the callback (short-lived, same-request-origin)
-    session["google_auth_state"] = state
+
+    # ── Encode mode into the state param so it survives the cross-domain redirect.
+    # Session cookies are NOT sent by the browser when Google redirects back to a
+    # different domain (Render backend vs Vercel frontend), so we can't rely on
+    # session["google_auth_mode"]. The state param IS echoed back by Google in
+    # the callback URL, making it a reliable cross-domain carrier. ──
+    state_payload = encode_state({"mode": mode})
+    url, _ = flow.authorization_url(access_type="offline", prompt="consent", state=state_payload)
+
+    # Also keep in session as a belt-and-suspenders fallback for same-domain dev
+    session["google_auth_state"] = state_payload
     session["google_auth_mode"] = mode
     session.permanent = True
     return jsonify({"auth_url": url})
@@ -812,21 +837,21 @@ def api_google_auth():
 
 @app.route("/api/auth/google/callback")
 def api_google_callback():
-    state = session.get("google_auth_state")
-    logger.info(f"[Google callback] session_state_present={state is not None}")
-    # When the frontend and backend are on different domains, the session cookie
-    # that stored google_auth_state during /api/auth/google may not be sent back
-    # to the backend by the browser (cross-site cookie restriction). We fall back
-    # to reading the state directly from the URL query parameter so the OAuth
-    # flow can still complete. Google always echoes the state back in the callback URL.
-    if not state:
-        state = request.args.get("state")
-        logger.info(f"[Google callback] state taken from URL param: {state is not None}")
+    # ── Recover state from the URL param (cross-domain safe) first, then session. ──
+    raw_state = request.args.get("state", "")
+    state_data = decode_state(raw_state)
+    # mode: "login" means only existing users are allowed;
+    #        "register" (or anything else) auto-creates the account.
+    mode = state_data.get("mode") or session.get("google_auth_mode", "login")
+
+    session_state = session.get("google_auth_state")
+    logger.info(f"[Google callback] session_state_present={session_state is not None} mode={mode}")
+    # Use whichever state we have — the URL param carries our encoded payload so it
+    # always wins; fall back to session for same-domain dev setups.
+    final_state = raw_state or session_state
+    logger.info(f"[Google callback] state taken from URL param: {raw_state is not None}")
     try:
-        # Build the flow; pass state only when we have it so the library can
-        # validate it. If it is still None we skip validation (acceptable because
-        # the exchange itself is still secured by the one-time auth code).
-        flow_kwargs = {"state": state} if state else {}
+        flow_kwargs = {"state": final_state} if final_state else {}
         flow = Flow.from_client_config({
             "web": {
                 "client_id": GOOGLE_OAUTH_CLIENT_ID,
@@ -844,15 +869,24 @@ def api_google_callback():
         email = info.get('email')
         if not email:
             return flask_redirect(f"{FRONTEND_URL}/login?error=google_no_email")
-        user = get_user_by_email(email)
-        if not user:
-            uname = email.split('@')[0] + '_' + uuid.uuid4().hex[:6]
-            uid, err = create_user(uname, generate_password_hash(uuid.uuid4().hex), email)
-            if not uid:
-                return flask_redirect(f"{FRONTEND_URL}/login?error=signup_failed")
-            user = get_user_by_email(email)
 
-        # ── KEY FIX: pass a JWT in the redirect URL instead of relying on cookies ──
+        user = get_user_by_email(email)
+
+        if not user:
+            if mode == "login":
+                # ── Only registered users may sign in with Google.
+                # A user who hasn't registered yet must go through /register first. ──
+                logger.warning(f"[Google login] email={email} not registered — blocking (mode=login)")
+                return flask_redirect(f"{FRONTEND_URL}/login?error=google_not_registered")
+            else:
+                # mode == "register" — create the account automatically
+                uname = email.split('@')[0] + '_' + uuid.uuid4().hex[:6]
+                uid, err = create_user(uname, generate_password_hash(uuid.uuid4().hex), email)
+                if not uid:
+                    return flask_redirect(f"{FRONTEND_URL}/register?error=signup_failed")
+                user = get_user_by_email(email)
+
+        # ── Pass a JWT in the redirect URL instead of relying on cookies ──
         token = make_token(user['id'], user['username'])
         logger.info(f"[Google login OK] user_id={user['id']} email={email} — redirecting with JWT")
         return flask_redirect(f"{FRONTEND_URL}/dashboard?token={token}")
@@ -875,19 +909,35 @@ def api_drive_connect():
         }
     }, scopes=SCOPES)
     flow.redirect_uri = GOOGLE_DRIVE_REDIRECT
-    url, state = flow.authorization_url(access_type='offline', prompt='consent')
-    # Store both the OAuth state AND the user_id in the session so the
-    # drive callback (a browser redirect, not XHR) can still identify the user.
-    session['drive_auth_state'] = state
+
+    # ── Encode user_id into state so the drive callback can identify the user
+    # even when the session cookie is lost across domains (Vercel ↔ Render). ──
+    state_payload = encode_state({"user_id": request.user_id})
+    url, _ = flow.authorization_url(access_type='offline', prompt='consent', state=state_payload)
+
+    # Keep in session as belt-and-suspenders for same-domain dev setups
+    session['drive_auth_state'] = state_payload
     session['drive_user_id'] = request.user_id
     return jsonify({"auth_url": url})
 
 @app.route("/api/drive/callback")
 def api_drive_callback():
-    uid = session.get('drive_user_id') or session.get('user_id')
-    state = session.get('drive_auth_state')
+    # ── PRIMARY: recover user_id from the state param (cross-domain safe).
+    # The session cookie that stored drive_user_id during /api/drive/connect is
+    # NOT sent back when Google redirects to the backend on a different domain
+    # (Render) from the frontend (Vercel). The state param IS echoed back in
+    # the callback URL by Google, so we decode user_id from it instead. ──
+    raw_state = request.args.get("state", "")
+    state_data = decode_state(raw_state)
+    uid = (
+        state_data.get("user_id")          # ← cross-domain safe (URL param)
+        or session.get('drive_user_id')    # ← same-domain dev fallback
+        or session.get('user_id')
+    )
+    logger.info(f"[Drive callback] uid={uid} state_data={state_data}")
     if not uid:
-        return flask_redirect(f"{FRONTEND_URL}/login?error=session_expired")
+        logger.error("[Drive callback] No user_id — session cookie was lost cross-domain")
+        return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=error&reason=session_lost")
     try:
         flow = Flow.from_client_config({
             "web": {
@@ -897,7 +947,7 @@ def api_drive_callback():
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "redirect_uris": [GOOGLE_DRIVE_REDIRECT]
             }
-        }, scopes=SCOPES, state=state)
+        }, scopes=SCOPES, state=raw_state or None)
         flow.redirect_uri = GOOGLE_DRIVE_REDIRECT
         flow.fetch_token(authorization_response=request.url)
         creds = flow.credentials
@@ -910,6 +960,7 @@ def api_drive_callback():
             'scopes': list(creds.scopes) if creds.scopes else SCOPES
         }
         save_drive_credentials(uid, json.dumps(cd))
+        logger.info(f"[Drive callback] Drive connected for user_id={uid}")
         return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=connected")
     except Exception as e:
         logger.error(f"Drive callback error: {e}")

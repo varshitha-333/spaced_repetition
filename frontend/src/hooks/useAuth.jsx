@@ -36,6 +36,12 @@ export function AuthProvider({ children }) {
       params.delete('error');
       const clean = window.location.pathname + (params.toString() ? `?${params}` : '');
       window.history.replaceState({}, '', clean);
+      // Surface a user-friendly message for the "not registered" case
+      if (errorParam === 'google_not_registered') {
+        console.warn('[AUTH] Google sign-in blocked — email not registered. User must register first.');
+        // Store so Login page can pick it up and show a toast / banner
+        window.__googleAuthError = 'not_registered';
+      }
       setLoading(false);
     } else {
       // Normal page load — check if we already have a stored token
