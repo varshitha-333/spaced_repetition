@@ -27,6 +27,11 @@ import traceback
 from tempfile import NamedTemporaryFile
 import urllib.parse
 import jwt as pyjwt   # pip install PyJWT
+from zoneinfo import ZoneInfo
+try:
+    from twilio.rest import Client as TwilioClient
+except Exception:
+    TwilioClient = None
 
 load_dotenv()
 
@@ -73,6 +78,26 @@ logger.info("══════════════════════�
 APP_FOLDER_NAME = "Learning Intake"
 SHEET_TITLE = "Learning Intake Log"
 REVISION_INTERVALS = [1, 3, 6, 29, 179]
+
+REVISION_STAGE_LABELS = [f"Day {days}" for days in REVISION_INTERVALS]
+DEFAULT_NOTIFICATION_HOUR = int(os.getenv("DEFAULT_NOTIFICATION_HOUR", "8"))
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_PHONE = os.getenv("TWILIO_FROM_PHONE")
+DAILY_NOTIFICATION_SECRET = os.getenv("DAILY_NOTIFICATION_SECRET")
+APP_DEEP_LINK = f"{FRONTEND_URL}/today"
+NOTIFICATION_QUOTES = [
+    "Success is the sum of small efforts repeated day in and day out.",
+    "A little progress each day adds up to big results.",
+    "Discipline today creates confidence tomorrow.",
+    "Your future self will thank you for the revision you do today.",
+    "Consistency beats intensity when learning for the long run.",
+    "Every review is a vote for the person you want to become.",
+    "Tiny study wins compound into major breakthroughs.",
+    "Stay patient — memory grows stronger with every recall.",
+    "The best streak is the one you protect today.",
+    "Keep showing up. That is how difficult things become familiar.",
+]
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-to-a-strong-secret-in-production")
@@ -291,6 +316,17 @@ def get_user_by_email(email):
         logger.error(f"get_user_by_email error: {e}")
         return None
 
+
+def get_user_by_id(user_id):
+    if not supabase:
+        return None
+    try:
+        r = supabase.table('users').select('*').eq('id', user_id).execute()
+        return r.data[0] if r.data else None
+    except Exception as e:
+        logger.error(f"get_user_by_id error: {e}")
+        return None
+
 def create_user(username, password_hash, email):
     """Returns (user_id, error_message). user_id is None on failure."""
     if not supabase:
@@ -311,7 +347,12 @@ def create_user(username, password_hash, email):
                 'spreadsheet_id': None,
                 'current_streak': 0,
                 'last_completion_date': None,
-                'google_drive_credentials': None
+                'google_drive_credentials': None,
+                'notification_phone': None,
+                'sms_notifications_enabled': False,
+                'notification_timezone': 'UTC',
+                'notification_hour': DEFAULT_NOTIFICATION_HOUR,
+                'last_sms_sent_date': None
             }).execute()
         except Exception as e:
             logger.warning(f"user_state insert failed (non-fatal): {e}")
@@ -357,6 +398,125 @@ def get_drive_credentials(user_id):
         return None
     except:
         return None
+
+
+def is_twilio_configured():
+    return bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_PHONE and TwilioClient)
+
+
+def normalize_phone_number(raw_phone):
+    if not raw_phone:
+        return None
+    cleaned = re.sub(r"[^\d+]", "", str(raw_phone).strip())
+    if cleaned.startswith("00"):
+        cleaned = "+" + cleaned[2:]
+    if cleaned and not cleaned.startswith("+"):
+        cleaned = "+" + cleaned
+    if not re.fullmatch(r"\+\d{8,15}", cleaned or ""):
+        raise ValueError("Phone number must be in international format, for example +14155550100")
+    return cleaned
+
+
+def resolve_user_timezone(tz_name):
+    try:
+        return ZoneInfo(tz_name or "UTC")
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def get_quote_for_date(target_date):
+    if not NOTIFICATION_QUOTES:
+        return "Keep going — every review strengthens your memory."
+    return NOTIFICATION_QUOTES[target_date.toordinal() % len(NOTIFICATION_QUOTES)]
+
+
+def get_revision_link(row):
+    if row.get('drive_link'):
+        return row.get('drive_link')
+    if row.get('url'):
+        return row.get('url')
+    if row.get('supabase_path'):
+        return get_supabase_url(row.get('supabase_path'))
+    return None
+
+
+def get_due_revision_buckets(user_id, target_day):
+    if not supabase:
+        return [], []
+    day_str = target_day.isoformat()
+    today_rows = supabase.table('revisions').select('*').eq('user_id', user_id).eq('scheduled_date', day_str).eq('completed', False).order('stage').execute().data or []
+    overdue_rows = supabase.table('revisions').select('*').eq('user_id', user_id).lt('scheduled_date', day_str).eq('completed', False).order('scheduled_date').execute().data or []
+    return today_rows, overdue_rows
+
+
+def build_daily_sms(username, target_day, today_rows, overdue_rows, streak):
+    pretty_date = target_day.strftime("%A, %b %d")
+    today_lines = []
+    for idx, row in enumerate(today_rows, start=1):
+        label = REVISION_STAGE_LABELS[(row.get('stage', 1) - 1)] if row.get('stage') else f"Stage {idx}"
+        title = row.get('heading', 'Untitled')
+        link = get_revision_link(row)
+        line = f"{idx}. {title} ({label})"
+        if link:
+            line += f" - {link}"
+        today_lines.append(line)
+
+    carry_forward = []
+    for row in overdue_rows[:5]:
+        carry_forward.append(row.get('heading', 'Untitled'))
+
+    lines = [
+        f"Good morning {username}! ☀️",
+        f"Today's LearnFlow revision plan for {pretty_date}: {len(today_rows)} due now, {len(overdue_rows)} carried forward, streak {streak} day(s).",
+        "Complete today's reviews to protect your momentum.",
+    ]
+
+    if today_lines:
+        lines.append("Today's revision links:")
+        lines.extend(today_lines)
+    else:
+        lines.append("No new revisions are due today, but check your carry-forward items below.")
+
+    if carry_forward:
+        suffix = "" if len(overdue_rows) <= 5 else f" +{len(overdue_rows) - 5} more"
+        lines.append(f"Due from previous day(s): {', '.join(carry_forward)}{suffix}")
+
+    lines.append(f"Motivation: {get_quote_for_date(target_day)}")
+    lines.append(f"Open LearnFlow: {APP_DEEP_LINK}")
+    return "\n".join(lines)
+
+
+def send_sms_message(phone_number, body):
+    if not is_twilio_configured():
+        raise RuntimeError("Twilio is not configured")
+    client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    return client.messages.create(
+        body=body,
+        from_=TWILIO_FROM_PHONE,
+        to=phone_number,
+    )
+
+
+def sync_learning_progress(user_id, learning_id):
+    if not supabase or not learning_id:
+        return
+    try:
+        pending = supabase.table('revisions').select('stage, scheduled_date').eq('user_id', user_id).eq('learning_id', learning_id).eq('completed', False).order('scheduled_date').limit(1).execute()
+        if pending.data:
+            next_row = pending.data[0]
+            supabase.table('learnings').update({
+                'revision_stage': max((next_row.get('stage') or 1) - 1, 0),
+                'next_revision_date': next_row.get('scheduled_date')
+            }).eq('id', learning_id).execute()
+        else:
+            supabase.table('learnings').update({
+                'revision_stage': len(REVISION_INTERVALS),
+                'next_revision_date': None,
+                'completed': True
+            }).eq('id', learning_id).execute()
+    except Exception as e:
+        logger.warning(f"sync_learning_progress failed for {learning_id}: {e}")
+
 
 
 # ─── SUPABASE STORAGE ───
@@ -488,6 +648,14 @@ def schedule_revisions(user_id, item_id, heading, description, drive_link=None, 
     except Exception as e:
         logger.error(f"Schedule error: {e}")
         return False
+
+
+def get_due_logic_summary():
+    return {
+        "intervals": REVISION_INTERVALS,
+        "labels": REVISION_STAGE_LABELS,
+        "description": "Every new learning item is scheduled for review on Day 1, 3, 6, 29 and 179. Missed reviews remain overdue until completed, so weaker memories keep resurfacing."
+    }
 
 def get_revision_stats(user_id):
     if not supabase:
@@ -783,9 +951,9 @@ def api_me():
         data = decode_token(token)
         user_id = data["user_id"]
         username = data.get("username", "")
-        state = get_user_state(user_id)
+        state = get_user_state(user_id) or {}
         dc = False
-        if state and state.get('drive_connected'):
+        if state.get('drive_connected'):
             cj = get_drive_credentials(user_id)
             dc = cj is not None
         logger.info(f"[ME OK] user_id={user_id}")
@@ -793,13 +961,147 @@ def api_me():
             "user": {
                 "id": user_id,
                 "username": username,
-                "drive_connected": dc
+                "drive_connected": dc,
+                "drive_status": "connected" if dc else "not_connected",
+                "notification_phone": state.get('notification_phone'),
+                "sms_notifications_enabled": bool(state.get('sms_notifications_enabled')),
+                "notification_timezone": state.get('notification_timezone') or "UTC",
+                "notification_hour": state.get('notification_hour', DEFAULT_NOTIFICATION_HOUR),
+                "twilio_configured": is_twilio_configured(),
             }
         })
     except pyjwt.ExpiredSignatureError:
         return jsonify({"user": None}), 401
     except pyjwt.InvalidTokenError:
         return jsonify({"user": None}), 401
+
+
+@app.route("/api/notifications/preferences", methods=["GET", "PUT"])
+@login_required
+def api_notification_preferences():
+    uid = request.user_id
+    state = get_user_state(uid) or {}
+
+    if request.method == "GET":
+        return jsonify({
+            "phone_number": state.get('notification_phone'),
+            "enabled": bool(state.get('sms_notifications_enabled')),
+            "timezone": state.get('notification_timezone') or "UTC",
+            "notification_hour": state.get('notification_hour', DEFAULT_NOTIFICATION_HOUR),
+            "twilio_configured": is_twilio_configured(),
+        })
+
+    data = request.get_json(force=True, silent=True) or {}
+    enabled = bool(data.get('enabled'))
+    timezone_name = (data.get('timezone') or state.get('notification_timezone') or 'UTC').strip()
+    notification_hour = int(data.get('notification_hour', state.get('notification_hour', DEFAULT_NOTIFICATION_HOUR)))
+    current_phone = state.get('notification_phone')
+    raw_phone = (data.get('phone_number') or current_phone or '').strip()
+
+    try:
+        ZoneInfo(timezone_name)
+    except Exception:
+        return jsonify({"error": "Invalid timezone"}), 400
+
+    if notification_hour < 0 or notification_hour > 23:
+        return jsonify({"error": "notification_hour must be between 0 and 23"}), 400
+
+    normalized_phone = None
+    if raw_phone:
+        try:
+            normalized_phone = normalize_phone_number(raw_phone)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    if enabled and not normalized_phone:
+        return jsonify({"error": "Phone number is required to enable SMS reminders"}), 400
+
+    updates = {
+        'notification_phone': normalized_phone,
+        'sms_notifications_enabled': enabled,
+        'notification_timezone': timezone_name,
+        'notification_hour': notification_hour,
+    }
+    if not update_user_state(uid, **updates):
+        return jsonify({"error": "Could not save notification preferences. Ensure the new columns exist in user_state."}), 500
+
+    return jsonify({
+        "message": "Notification preferences saved",
+        "preferences": {
+            "phone_number": normalized_phone,
+            "enabled": enabled,
+            "timezone": timezone_name,
+            "notification_hour": notification_hour,
+            "twilio_configured": is_twilio_configured(),
+        }
+    })
+
+
+@app.route("/api/notifications/send-daily", methods=["POST"])
+def api_send_daily_notifications():
+    provided_secret = request.headers.get("X-Notification-Secret", "")
+    if not DAILY_NOTIFICATION_SECRET or provided_secret != DAILY_NOTIFICATION_SECRET:
+        return jsonify({"error": "Unauthorized"}), 403
+    if not supabase:
+        return jsonify({"error": "Database not configured"}), 503
+    if not is_twilio_configured():
+        return jsonify({"error": "Twilio is not configured"}), 503
+
+    processed = []
+    skipped = []
+    states = supabase.table('user_state').select('*').execute().data or []
+
+    for state in states:
+        if not state.get('sms_notifications_enabled') or not state.get('notification_phone'):
+            continue
+
+        user_id = state.get('user_id')
+        user = get_user_by_id(user_id)
+        if not user:
+            skipped.append({"user_id": user_id, "reason": "user_not_found"})
+            continue
+
+        zone = resolve_user_timezone(state.get('notification_timezone'))
+        local_now = datetime.now(zone)
+        local_today = local_now.date()
+        target_hour = int(state.get('notification_hour') or DEFAULT_NOTIFICATION_HOUR)
+
+        if local_now.hour != target_hour:
+            skipped.append({"user_id": user_id, "reason": "outside_delivery_hour", "timezone": str(zone), "local_hour": local_now.hour})
+            continue
+
+        if state.get('last_sms_sent_date') == local_today.isoformat():
+            skipped.append({"user_id": user_id, "reason": "already_sent_today"})
+            continue
+
+        today_rows, overdue_rows = get_due_revision_buckets(user_id, local_today)
+        if not today_rows and not overdue_rows:
+            skipped.append({"user_id": user_id, "reason": "nothing_due"})
+            continue
+
+        streak, _ = get_user_streak(user_id)
+        body = build_daily_sms(user.get('username', 'Learner'), local_today, today_rows, overdue_rows, streak)
+        try:
+            result = send_sms_message(state['notification_phone'], body)
+            update_user_state(user_id, last_sms_sent_date=local_today.isoformat())
+            processed.append({
+                "user_id": user_id,
+                "username": user.get('username'),
+                "phone_number": state['notification_phone'],
+                "twilio_sid": getattr(result, 'sid', None),
+                "due_today": len(today_rows),
+                "overdue": len(overdue_rows),
+            })
+        except Exception as exc:
+            logger.error(f"Daily SMS failed for {user_id}: {exc}")
+            skipped.append({"user_id": user_id, "reason": f"send_failed: {exc}"})
+
+    return jsonify({
+        "message": "Daily notification job completed",
+        "sent": processed,
+        "skipped": skipped,
+        "processed_count": len(processed),
+    })
 
 
 # ─── GOOGLE AUTH (Sign in with Google) ───
@@ -1122,6 +1424,7 @@ def api_stats():
     stats = get_revision_stats(uid)
     streak, _ = get_user_streak(uid)
     stats['streak'] = streak
+    stats['due_logic'] = get_due_logic_summary()
     return jsonify(stats)
 
 @app.route("/api/revisions/<revision_id>/complete", methods=["POST"])
@@ -1135,6 +1438,7 @@ def api_complete(revision_id):
     stg = r.data[0]['stage']
     supabase.table('revisions').update({'completed': True, 'completed_date': date.today().isoformat()}).eq('id', revision_id).execute()
     supabase.table('learnings').update({'revision_stage': stg}).eq('id', lid).execute()
+    sync_learning_progress(uid, lid)
     update_streak(uid)
     return jsonify({"message": "Completed!"})
 
@@ -1143,19 +1447,26 @@ def api_complete(revision_id):
 def api_postpone(revision_id):
     uid = request.user_id
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    r = supabase.table('revisions').select('learning_id').eq('id', revision_id).eq('user_id', uid).execute()
+    if not r.data:
+        return jsonify({"error": "Not found"}), 404
+    lid = r.data[0]['learning_id']
     supabase.table('revisions').update({'scheduled_date': tomorrow}).eq('id', revision_id).eq('user_id', uid).execute()
+    sync_learning_progress(uid, lid)
     return jsonify({"message": "Postponed to tomorrow"})
 
 @app.route("/api/revisions/<revision_id>/skip", methods=["POST"])
 @login_required
 def api_skip(revision_id):
     uid = request.user_id
-    r = supabase.table('revisions').select('scheduled_date').eq('id', revision_id).eq('user_id', uid).execute()
+    r = supabase.table('revisions').select('scheduled_date', 'learning_id').eq('id', revision_id).eq('user_id', uid).execute()
     if not r.data:
         return jsonify({"error": "Not found"}), 404
     current = r.data[0]['scheduled_date']
+    lid = r.data[0]['learning_id']
     new_date = (datetime.strptime(current, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
     supabase.table('revisions').update({'scheduled_date': new_date}).eq('id', revision_id).execute()
+    sync_learning_progress(uid, lid)
     return jsonify({"message": f"Skipped to {new_date}"})
 
 

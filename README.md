@@ -163,6 +163,15 @@ CREATE INDEX IF NOT EXISTS idx_revisions_user_completed ON revisions(user_id, co
 CREATE INDEX IF NOT EXISTS idx_learnings_user ON learnings(user_id);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+
+-- Add SMS reminder settings to user_state
+alter table if exists public.user_state
+  add column if not exists notification_phone text,
+  add column if not exists sms_notifications_enabled boolean not null default false,
+  add column if not exists notification_timezone text not null default 'UTC',
+  add column if not exists notification_hour integer not null default 8,
+  add column if not exists last_sms_sent_date date;
+
 ```
 
 Then in **Supabase Settings**:
