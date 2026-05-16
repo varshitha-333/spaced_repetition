@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { useAuth } from '../hooks/useAuth';
 import { getGoogleAuthUrl } from '../utils/api';
 import toast from 'react-hot-toast';
-import { FiMail, FiLock, FiUser, FiArrowRight } from 'react-icons/fi';
+import { FiLock, FiUser, FiArrowRight } from 'react-icons/fi';
 import { FcGoogle } from 'react-icons/fc';
 
 export default function Login() {
@@ -32,9 +32,10 @@ export default function Login() {
     }
   };
 
+  // ── Renamed to "Login with Google" per request ──
   const handleGoogleLogin = async () => {
     try {
-      const res = await getGoogleAuthUrl();
+      const res = await getGoogleAuthUrl('login');
       window.location.href = res.data.auth_url;
     } catch {
       toast.error('Google login unavailable');
@@ -43,7 +44,6 @@ export default function Login() {
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden">
-      {/* Background decorations */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute -top-40 -right-40 w-80 h-80 bg-primary-200/30 rounded-full blur-3xl" />
         <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-accent-200/30 rounded-full blur-3xl" />
@@ -56,7 +56,6 @@ export default function Login() {
         transition={{ duration: 0.6 }}
         className="w-full max-w-md relative z-10"
       >
-        {/* Logo */}
         <div className="text-center mb-8">
           <motion.div
             className="text-6xl mb-3 inline-block"
@@ -69,7 +68,6 @@ export default function Login() {
           <p className="text-gray-500 text-sm">Smart spaced repetition for students</p>
         </div>
 
-        {/* Card */}
         <div className="glass-card p-8">
           <h2 className="text-xl font-bold text-gray-800 mb-6 text-center">Welcome Back</h2>
 
@@ -84,6 +82,7 @@ export default function Login() {
                   onChange={(e) => setUsername(e.target.value)}
                   className="input-field pl-11"
                   placeholder="Enter your username"
+                  autoComplete="username"
                 />
               </div>
             </div>
@@ -97,6 +96,7 @@ export default function Login() {
                   onChange={(e) => setPassword(e.target.value)}
                   className="input-field pl-11"
                   placeholder="Enter your password"
+                  autoComplete="current-password"
                 />
               </div>
             </div>
@@ -109,7 +109,7 @@ export default function Login() {
                 <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
               ) : (
                 <>
-                  <span>Sign In</span>
+                  <span>Login</span>
                   <FiArrowRight />
                 </>
               )}
@@ -125,16 +125,17 @@ export default function Login() {
             </div>
           </div>
 
+          {/* ✅ Text changed from "Sign in with Google" to "Login with Google" */}
           <button
             onClick={handleGoogleLogin}
             className="w-full flex items-center justify-center gap-3 px-6 py-3 rounded-xl border-2 border-gray-200 bg-white hover:bg-gray-50 hover:border-gray-300 transition-all duration-300 font-medium text-gray-700"
           >
             <FcGoogle size={22} />
-            <span>Sign in with Google</span>
+            <span>Login with Google</span>
           </button>
 
           <p className="text-center text-sm text-gray-500 mt-6">
-            Don't have an account?{' '}
+            Don&apos;t have an account?{' '}
             <Link to="/register" className="text-primary-600 font-semibold hover:underline">
               Sign up free
             </Link>

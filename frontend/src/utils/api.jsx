@@ -1,16 +1,39 @@
 import axios from 'axios';
 
-// In production (Vercel), set VITE_API_URL = https://spaced-repetition-59xo.onrender.com
-// In dev (localhost), leave it empty and Vite proxies /api/* to localhost:5000
+// In production (Vercel): set VITE_API_URL = https://spaced-repetition-59xo.onrender.com
+// In dev (localhost):     leave empty — Vite proxies /api/* to localhost:5000
 const API_BASE = import.meta.env.VITE_API_URL || '';
+
+// 🐞 DEBUG: print which backend is being used (visible in browser console)
+console.log('[API] baseURL =', API_BASE || '(same-origin / proxy)');
 
 const api = axios.create({
   baseURL: API_BASE,
-  withCredentials: true,
+  withCredentials: true,           // ✅ MUST be true so the session cookie is sent cross-site
   headers: {
     'Content-Type': 'application/json',
   },
 });
+
+// ── Debug request interceptor ──
+api.interceptors.request.use((cfg) => {
+  console.log(`[API →] ${cfg.method?.toUpperCase()} ${cfg.url}  withCredentials=${cfg.withCredentials}`);
+  return cfg;
+});
+
+// ── Debug response interceptor ──
+api.interceptors.response.use(
+  (res) => {
+    console.log(`[API ←] ${res.status} ${res.config.url}`);
+    return res;
+  },
+  (err) => {
+    const status = err.response?.status;
+    const url = err.config?.url;
+    console.warn(`[API ✗] ${status} ${url}`, err.response?.data);
+    return Promise.reject(err);
+  }
+);
 
 // ── Auth ──
 export const login = (username, password) =>
@@ -23,7 +46,13 @@ export const logout = () => api.post('/api/auth/logout');
 
 export const getMe = () => api.get('/api/auth/me');
 
-// mode = 'login' | 'register'  (purely informational for the backend)
+// Debug helper — call from console: window.__healthCheck()
+export const healthCheck = () => api.get('/api/health');
+if (typeof window !== 'undefined') {
+  window.__healthCheck = () => healthCheck().then(r => console.log('HEALTH:', r.data));
+}
+
+// mode = 'login' | 'register'
 export const getGoogleAuthUrl = (mode = 'login') =>
   api.get('/api/auth/google', { params: { mode } });
 

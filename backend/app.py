@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -6,6 +7,7 @@ import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, session, redirect as flask_redirect
 from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix          # ✅ NEW
 from PyPDF2 import PdfReader
 from docx import Document
 from google_auth_oauthlib.flow import Flow
@@ -41,7 +43,6 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "learning-intake-uploads")
 
-# ── FIX: don't crash on missing env vars (so Render boots and we can see errors) ──
 supabase: Client = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -54,13 +55,11 @@ else:
 
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
 GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
-# ── FIX: strip trailing slash so we never produce 'https://x//api/auth/google/callback' ──
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5000").rstrip("/")
+BACKEND_URL  = os.getenv("BACKEND_URL",  "http://localhost:5000").rstrip("/")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
 
-# ── FIX: log the EXACT redirect URIs at startup so you can paste them into Google Console ──
-GOOGLE_LOGIN_REDIRECT  = f"{BACKEND_URL}/api/auth/google/callback"
-GOOGLE_DRIVE_REDIRECT  = f"{BACKEND_URL}/api/drive/callback"
+GOOGLE_LOGIN_REDIRECT = f"{BACKEND_URL}/api/auth/google/callback"
+GOOGLE_DRIVE_REDIRECT = f"{BACKEND_URL}/api/drive/callback"
 logger.info("═══════════════════════════════════════════════════════")
 logger.info(f"BACKEND_URL  = {BACKEND_URL}")
 logger.info(f"FRONTEND_URL = {FRONTEND_URL}")
@@ -69,6 +68,7 @@ logger.info(f"Google drive  redirect_uri = {GOOGLE_DRIVE_REDIRECT}")
 logger.info("↑ These two URIs MUST be added EXACTLY to Google Cloud Console →")
 logger.info("  APIs & Services → Credentials → OAuth 2.0 Client → Authorized redirect URIs")
 logger.info("═══════════════════════════════════════════════════════")
+
 APP_FOLDER_NAME = "Learning Intake"
 SHEET_TITLE = "Learning Intake Log"
 REVISION_INTERVALS = [1, 3, 6, 29, 179]
@@ -76,36 +76,99 @@ REVISION_INTERVALS = [1, 3, 6, 29, 179]
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-to-a-strong-secret-in-production")
 
-# ── FIX: cross-site cookie settings (Vercel ↔ Render) ──
-app.config['SESSION_COOKIE_SAMESITE'] = 'None'
-app.config['SESSION_COOKIE_SECURE'] = True
-app.config['SESSION_COOKIE_HTTPONLY'] = True
+# ════════════════════════════════════════════════════════════════
+# 🔧 CRITICAL FIX #1: ProxyFix
+# Render (and Heroku, Railway, Fly, etc.) terminates HTTPS at its
+# load-balancer, then forwards plain HTTP to your app. Without this,
+# Flask thinks the request is HTTP, refuses to mark the session
+# cookie as Secure, and the browser silently drops it.
+# This is the #1 reason "login works but /me returns 401".
+# ════════════════════════════════════════════════════════════════
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
-# ── FIX: explicit CORS list including the actual Vercel domain + previews ──
+# ════════════════════════════════════════════════════════════════
+# 🔧 CRITICAL FIX #2: Cross-site cookie config
+# Frontend (Vercel) and backend (Render) are on different domains,
+# so the session cookie must be SameSite=None + Secure to be sent.
+# ════════════════════════════════════════════════════════════════
+app.config.update(
+    SESSION_COOKIE_NAME='learnflow_session',
+    SESSION_COOKIE_SAMESITE='None',
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_PERMANENT=True,
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+)
+
+# Make every session permanent (so the cookie has an Expires/Max-Age
+# attribute and survives browser restarts).
+@app.before_request
+def _make_session_permanent():
+    session.permanent = True
+
+# ════════════════════════════════════════════════════════════════
+# 🔧 CRITICAL FIX #3: CORS — explicit origins + regex for previews
+# ════════════════════════════════════════════════════════════════
 ALLOWED_ORIGINS = [
     FRONTEND_URL,
     "http://localhost:5173",
     "http://localhost:3000",
     "https://spaced-repetition-umber.vercel.app",
 ]
-# also accept any *.vercel.app preview deployment of this project
+# regex objects (NOT strings) are required for pattern matching
+VERCEL_PREVIEW_REGEX = re.compile(r"^https://.*\.vercel\.app$")
+
 CORS(
     app,
     supports_credentials=True,
-    origins=ALLOWED_ORIGINS + [r"https://.*\.vercel\.app$"],
-    allow_headers=["Content-Type", "Authorization"],
+    origins=ALLOWED_ORIGINS + [VERCEL_PREVIEW_REGEX],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    expose_headers=["Content-Type"],
+    max_age=600,
 )
 
+# ════════════════════════════════════════════════════════════════
+# 🐞 DEBUG MIDDLEWARE — logs cookies on every request
+# Remove or set DEBUG_AUTH=0 in production once stable.
+# ════════════════════════════════════════════════════════════════
+DEBUG_AUTH = os.getenv("DEBUG_AUTH", "1") == "1"
+
+@app.before_request
+def _debug_log_request():
+    if not DEBUG_AUTH:
+        return
+    if request.path.startswith("/api/"):
+        cookie_keys = list(request.cookies.keys())
+        has_session = 'learnflow_session' in request.cookies
+        logger.info(
+            f"[REQ] {request.method} {request.path} "
+            f"origin={request.headers.get('Origin')} "
+            f"cookies={cookie_keys} has_session_cookie={has_session} "
+            f"session_user_id={session.get('user_id')}"
+        )
+
+@app.after_request
+def _debug_log_response(resp):
+    if DEBUG_AUTH and request.path.startswith("/api/"):
+        set_cookie_headers = resp.headers.getlist('Set-Cookie')
+        if set_cookie_headers:
+            logger.info(f"[RESP] {request.method} {request.path} → {resp.status_code} "
+                        f"Set-Cookie: {[c[:80] + '...' for c in set_cookie_headers]}")
+        else:
+            logger.info(f"[RESP] {request.method} {request.path} → {resp.status_code} (no Set-Cookie)")
+    return resp
+
+
 # ═══════════════════════════════════════════════════════
-#  ROOT + HEALTH ROUTES  (FIX for Render 404 → worker kill)
+#  ROOT + HEALTH ROUTES
 # ═══════════════════════════════════════════════════════
 @app.route("/")
 def root():
     return jsonify({
         "service": "LearnFlow Backend",
         "status": "running",
-        "version": "1.0",
+        "version": "1.1-cookie-fix",
         "supabase": "connected" if supabase else "not_configured",
         "endpoints": ["/api/auth/register", "/api/auth/login", "/api/auth/me", "/api/health"]
     })
@@ -121,6 +184,11 @@ def api_health():
         "timestamp": datetime.utcnow().isoformat(),
         "supabase": bool(supabase),
         "frontend_url": FRONTEND_URL,
+        "backend_url": BACKEND_URL,
+        "secure_request": request.is_secure,   # should be True on Render after ProxyFix
+        "scheme": request.scheme,              # should be 'https' on Render after ProxyFix
+        "session_cookie_secure": app.config['SESSION_COOKIE_SECURE'],
+        "session_cookie_samesite": app.config['SESSION_COOKIE_SAMESITE'],
     })
 
 @app.route("/privacy")
@@ -162,6 +230,12 @@ def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if 'user_id' not in session:
+            if DEBUG_AUTH:
+                logger.warning(
+                    f"[AUTH-FAIL] {request.method} {request.path} - "
+                    f"no user_id in session. cookies_received={list(request.cookies.keys())} "
+                    f"origin={request.headers.get('Origin')}"
+                )
             return jsonify({"error": "Authentication required"}), 401
         return f(*args, **kwargs)
     return decorated
@@ -624,14 +698,15 @@ def api_register():
 
         uid, err = create_user(username, generate_password_hash(password), email)
         if uid:
-            # auto-login after registration
+            session.clear()
             session['user_id'] = uid
             session['username'] = username
+            session.permanent = True
+            logger.info(f"[REGISTER OK] user_id={uid} username={username} - session set")
             return jsonify({
                 "message": "Registration successful",
                 "user": {"id": uid, "username": username, "email": email}
             }), 201
-        # Show real error to help debug RLS / table-missing issues
         return jsonify({"error": f"Registration failed: {err or 'unknown'}"}), 500
     except Exception as e:
         logger.error(f"Register endpoint crashed: {e}\n{traceback.format_exc()}")
@@ -650,9 +725,17 @@ def api_login():
             return jsonify({"error": "Backend database not configured"}), 503
         user = get_user_by_username(username)
         if user and user.get('password_hash') and check_password_hash(user['password_hash'], password):
+            session.clear()
             session['user_id'] = user['id']
             session['username'] = username
-            return jsonify({"message": "Login successful", "user": {"id": user['id'], "username": username, "email": user.get('email')}})
+            session.permanent = True
+            logger.info(f"[LOGIN OK] user_id={user['id']} username={username} - session set, "
+                        f"cookie_secure={app.config['SESSION_COOKIE_SECURE']}, "
+                        f"samesite={app.config['SESSION_COOKIE_SAMESITE']}, "
+                        f"request_is_secure={request.is_secure}")
+            return jsonify({"message": "Login successful",
+                            "user": {"id": user['id'], "username": username, "email": user.get('email')}})
+        logger.warning(f"[LOGIN FAIL] username={username} - invalid credentials")
         return jsonify({"error": "Invalid credentials"}), 401
     except Exception as e:
         logger.error(f"Login error: {e}\n{traceback.format_exc()}")
@@ -661,8 +744,11 @@ def api_login():
 
 @app.route("/api/auth/logout", methods=["POST"])
 def api_logout():
+    uid = session.get('user_id')
     session.clear()
+    logger.info(f"[LOGOUT] user_id={uid}")
     return jsonify({"message": "Logged out"})
+
 
 @app.route("/api/auth/me")
 def api_me():
@@ -672,6 +758,7 @@ def api_me():
         if state and state.get('drive_connected'):
             cj = get_drive_credentials(session['user_id'])
             dc = cj is not None
+        logger.info(f"[ME OK] user_id={session['user_id']}")
         return jsonify({
             "user": {
                 "id": session['user_id'],
@@ -679,11 +766,16 @@ def api_me():
                 "drive_connected": dc
             }
         })
+    logger.warning(
+        f"[ME FAIL] No user_id in session. "
+        f"cookies_received={list(request.cookies.keys())} "
+        f"origin={request.headers.get('Origin')} "
+        f"referer={request.headers.get('Referer')}"
+    )
     return jsonify({"user": None}), 401
 
 
 # ─── GOOGLE AUTH (Sign in with Google) ───
-# Accepts ?mode=register or ?mode=login (UI only — behaviour is identical)
 @app.route("/api/auth/google")
 def api_google_auth():
     if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET:
@@ -703,11 +795,15 @@ def api_google_auth():
     logger.info(f"[Google login] Sending redirect_uri to Google: {GOOGLE_LOGIN_REDIRECT}")
     url, state = flow.authorization_url(access_type="offline", prompt="consent")
     session["google_auth_state"] = state
+    session.permanent = True
     return jsonify({"auth_url": url})
+
 
 @app.route("/api/auth/google/callback")
 def api_google_callback():
     state = session.get("google_auth_state")
+    logger.info(f"[Google callback] session_state_present={state is not None} "
+                f"cookies={list(request.cookies.keys())}")
     try:
         flow = Flow.from_client_config({
             "web": {
@@ -733,8 +829,11 @@ def api_google_callback():
             if not uid:
                 return flask_redirect(f"{FRONTEND_URL}/login?error=signup_failed")
             user = get_user_by_email(email)
+        session.clear()
         session['user_id'] = user['id']
         session['username'] = user['username']
+        session.permanent = True
+        logger.info(f"[Google login OK] user_id={user['id']} email={email}")
         return flask_redirect(f"{FRONTEND_URL}/dashboard?login=success")
     except Exception as e:
         logger.error(f"Google callback error: {e}\n{traceback.format_exc()}")
