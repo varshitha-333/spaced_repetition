@@ -1,5 +1,8 @@
 {
   "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
+    {
+      "source": "/api/:path*",
+      "destination": "https://spaced-repetition-59xo.onrender.com/api/:path*"
+    }
   ]
 }

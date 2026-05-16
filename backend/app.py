@@ -7,7 +7,7 @@ import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, session, redirect as flask_redirect
 from flask_cors import CORS
-from werkzeug.middleware.proxy_fix import ProxyFix          # ✅ NEW
+from werkzeug.middleware.proxy_fix import ProxyFix
 from PyPDF2 import PdfReader
 from docx import Document
 from google_auth_oauthlib.flow import Flow
@@ -26,6 +26,7 @@ import io
 import traceback
 from tempfile import NamedTemporaryFile
 import urllib.parse
+import jwt as pyjwt   # pip install PyJWT
 
 load_dotenv()
 
@@ -76,38 +77,26 @@ REVISION_INTERVALS = [1, 3, 6, 29, 179]
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-to-a-strong-secret-in-production")
 
-# ════════════════════════════════════════════════════════════════
-# 🔧 CRITICAL FIX #1: ProxyFix
-# Render (and Heroku, Railway, Fly, etc.) terminates HTTPS at its
-# load-balancer, then forwards plain HTTP to your app. Without this,
-# Flask thinks the request is HTTP, refuses to mark the session
-# cookie as Secure, and the browser silently drops it.
-# This is the #1 reason "login works but /me returns 401".
-# ════════════════════════════════════════════════════════════════
+# ProxyFix so request.is_secure is correct behind Render's load balancer
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
-# ════════════════════════════════════════════════════════════════
-# 🔧 CRITICAL FIX #2: Cross-site cookie config
-# Frontend (Vercel) and backend (Render) are on different domains,
-# so the session cookie must be SameSite=None + Secure to be sent.
-# ════════════════════════════════════════════════════════════════
+# Sessions are only used now for transient OAuth state (Google login + Drive connect).
+# All protected-route auth is handled via JWT in the Authorization header.
 app.config.update(
     SESSION_COOKIE_NAME='learnflow_session',
     SESSION_COOKIE_SAMESITE='None',
     SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_PERMANENT=True,
-    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+    SESSION_PERMANENT=False,          # short-lived — only needed for OAuth state round-trip
+    PERMANENT_SESSION_LIFETIME=timedelta(minutes=10),
 )
 
-# Make every session permanent (so the cookie has an Expires/Max-Age
-# attribute and survives browser restarts).
 @app.before_request
 def _make_session_permanent():
     session.permanent = True
 
 # ════════════════════════════════════════════════════════════════
-# 🔧 CRITICAL FIX #3: CORS — explicit origins + regex for previews
+# CORS
 # ════════════════════════════════════════════════════════════════
 ALLOWED_ORIGINS = [
     FRONTEND_URL,
@@ -115,7 +104,6 @@ ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://spaced-repetition-umber.vercel.app",
 ]
-# regex objects (NOT strings) are required for pattern matching
 VERCEL_PREVIEW_REGEX = re.compile(r"^https://.*\.vercel\.app$")
 
 CORS(
@@ -128,10 +116,6 @@ CORS(
     max_age=600,
 )
 
-# ════════════════════════════════════════════════════════════════
-# 🐞 DEBUG MIDDLEWARE — logs cookies on every request
-# Remove or set DEBUG_AUTH=0 in production once stable.
-# ════════════════════════════════════════════════════════════════
 DEBUG_AUTH = os.getenv("DEBUG_AUTH", "1") == "1"
 
 @app.before_request
@@ -139,24 +123,18 @@ def _debug_log_request():
     if not DEBUG_AUTH:
         return
     if request.path.startswith("/api/"):
-        cookie_keys = list(request.cookies.keys())
-        has_session = 'learnflow_session' in request.cookies
+        auth = request.headers.get('Authorization', '')
+        has_jwt = auth.startswith('Bearer ')
         logger.info(
             f"[REQ] {request.method} {request.path} "
             f"origin={request.headers.get('Origin')} "
-            f"cookies={cookie_keys} has_session_cookie={has_session} "
-            f"session_user_id={session.get('user_id')}"
+            f"has_jwt={has_jwt}"
         )
 
 @app.after_request
 def _debug_log_response(resp):
     if DEBUG_AUTH and request.path.startswith("/api/"):
-        set_cookie_headers = resp.headers.getlist('Set-Cookie')
-        if set_cookie_headers:
-            logger.info(f"[RESP] {request.method} {request.path} → {resp.status_code} "
-                        f"Set-Cookie: {[c[:80] + '...' for c in set_cookie_headers]}")
-        else:
-            logger.info(f"[RESP] {request.method} {request.path} → {resp.status_code} (no Set-Cookie)")
+        logger.info(f"[RESP] {request.method} {request.path} → {resp.status_code}")
     return resp
 
 
@@ -168,7 +146,7 @@ def root():
     return jsonify({
         "service": "LearnFlow Backend",
         "status": "running",
-        "version": "1.1-cookie-fix",
+        "version": "2.0-jwt-auth",
         "supabase": "connected" if supabase else "not_configured",
         "endpoints": ["/api/auth/register", "/api/auth/login", "/api/auth/me", "/api/health"]
     })
@@ -185,10 +163,7 @@ def api_health():
         "supabase": bool(supabase),
         "frontend_url": FRONTEND_URL,
         "backend_url": BACKEND_URL,
-        "secure_request": request.is_secure,   # should be True on Render after ProxyFix
-        "scheme": request.scheme,              # should be 'https' on Render after ProxyFix
-        "session_cookie_secure": app.config['SESSION_COOKIE_SECURE'],
-        "session_cookie_samesite": app.config['SESSION_COOKIE_SAMESITE'],
+        "auth_method": "JWT",
     })
 
 @app.route("/privacy")
@@ -225,18 +200,55 @@ def ensure_bucket_exists():
         return False
 
 
+# ════════════════════════════════════════════════════════════════
+#  JWT HELPERS
+# ════════════════════════════════════════════════════════════════
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_DAYS = 30
+
+def make_token(user_id: str, username: str) -> str:
+    """Create a signed JWT valid for JWT_EXPIRY_DAYS days."""
+    payload = {
+        "user_id": user_id,
+        "username": username,
+        "exp": datetime.utcnow() + timedelta(days=JWT_EXPIRY_DAYS),
+        "iat": datetime.utcnow(),
+    }
+    return pyjwt.encode(payload, app.secret_key, algorithm=JWT_ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    """Decode and validate a JWT. Raises pyjwt.InvalidTokenError on failure."""
+    return pyjwt.decode(token, app.secret_key, algorithms=[JWT_ALGORITHM])
+
+
 # ─── AUTH HELPERS ───
 def login_required(f):
+    """
+    Protect a route with JWT.
+    Reads the token from the Authorization: Bearer <token> header.
+    Sets request.user_id and request.username for use inside the view.
+    """
     @wraps(f)
     def decorated(*args, **kwargs):
-        if 'user_id' not in session:
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.removeprefix("Bearer ").strip()
+        if not token:
             if DEBUG_AUTH:
                 logger.warning(
-                    f"[AUTH-FAIL] {request.method} {request.path} - "
-                    f"no user_id in session. cookies_received={list(request.cookies.keys())} "
-                    f"origin={request.headers.get('Origin')}"
+                    f"[AUTH-FAIL] {request.method} {request.path} — "
+                    f"no Authorization header. origin={request.headers.get('Origin')}"
                 )
             return jsonify({"error": "Authentication required"}), 401
+        try:
+            data = decode_token(token)
+            request.user_id = data["user_id"]
+            request.username = data.get("username", "")
+        except pyjwt.ExpiredSignatureError:
+            return jsonify({"error": "Session expired — please log in again"}), 401
+        except pyjwt.InvalidTokenError as e:
+            logger.warning(f"[AUTH-FAIL] Invalid JWT: {e}")
+            return jsonify({"error": "Invalid token"}), 401
         return f(*args, **kwargs)
     return decorated
 
@@ -698,13 +710,11 @@ def api_register():
 
         uid, err = create_user(username, generate_password_hash(password), email)
         if uid:
-            session.clear()
-            session['user_id'] = uid
-            session['username'] = username
-            session.permanent = True
-            logger.info(f"[REGISTER OK] user_id={uid} username={username} - session set")
+            token = make_token(uid, username)
+            logger.info(f"[REGISTER OK] user_id={uid} username={username}")
             return jsonify({
                 "message": "Registration successful",
+                "token": token,
                 "user": {"id": uid, "username": username, "email": email}
             }), 201
         return jsonify({"error": f"Registration failed: {err or 'unknown'}"}), 500
@@ -725,16 +735,13 @@ def api_login():
             return jsonify({"error": "Backend database not configured"}), 503
         user = get_user_by_username(username)
         if user and user.get('password_hash') and check_password_hash(user['password_hash'], password):
-            session.clear()
-            session['user_id'] = user['id']
-            session['username'] = username
-            session.permanent = True
-            logger.info(f"[LOGIN OK] user_id={user['id']} username={username} - session set, "
-                        f"cookie_secure={app.config['SESSION_COOKIE_SECURE']}, "
-                        f"samesite={app.config['SESSION_COOKIE_SAMESITE']}, "
-                        f"request_is_secure={request.is_secure}")
-            return jsonify({"message": "Login successful",
-                            "user": {"id": user['id'], "username": username, "email": user.get('email')}})
+            token = make_token(user['id'], username)
+            logger.info(f"[LOGIN OK] user_id={user['id']} username={username}")
+            return jsonify({
+                "message": "Login successful",
+                "token": token,
+                "user": {"id": user['id'], "username": username, "email": user.get('email')}
+            })
         logger.warning(f"[LOGIN FAIL] username={username} - invalid credentials")
         return jsonify({"error": "Invalid credentials"}), 401
     except Exception as e:
@@ -744,35 +751,38 @@ def api_login():
 
 @app.route("/api/auth/logout", methods=["POST"])
 def api_logout():
-    uid = session.get('user_id')
-    session.clear()
-    logger.info(f"[LOGOUT] user_id={uid}")
+    # With JWT the client discards the token; nothing to do server-side.
+    logger.info("[LOGOUT] JWT logout — client should delete token")
     return jsonify({"message": "Logged out"})
 
 
 @app.route("/api/auth/me")
 def api_me():
-    if 'user_id' in session:
-        state = get_user_state(session['user_id'])
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    if not token:
+        return jsonify({"user": None}), 401
+    try:
+        data = decode_token(token)
+        user_id = data["user_id"]
+        username = data.get("username", "")
+        state = get_user_state(user_id)
         dc = False
         if state and state.get('drive_connected'):
-            cj = get_drive_credentials(session['user_id'])
+            cj = get_drive_credentials(user_id)
             dc = cj is not None
-        logger.info(f"[ME OK] user_id={session['user_id']}")
+        logger.info(f"[ME OK] user_id={user_id}")
         return jsonify({
             "user": {
-                "id": session['user_id'],
-                "username": session.get('username'),
+                "id": user_id,
+                "username": username,
                 "drive_connected": dc
             }
         })
-    logger.warning(
-        f"[ME FAIL] No user_id in session. "
-        f"cookies_received={list(request.cookies.keys())} "
-        f"origin={request.headers.get('Origin')} "
-        f"referer={request.headers.get('Referer')}"
-    )
-    return jsonify({"user": None}), 401
+    except pyjwt.ExpiredSignatureError:
+        return jsonify({"user": None}), 401
+    except pyjwt.InvalidTokenError:
+        return jsonify({"user": None}), 401
 
 
 # ─── GOOGLE AUTH (Sign in with Google) ───
@@ -781,7 +791,6 @@ def api_google_auth():
     if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET:
         return jsonify({"error": "Google OAuth not configured"}), 503
     mode = request.args.get("mode", "login")
-    session["google_auth_mode"] = mode
     flow = Flow.from_client_config({
         "web": {
             "client_id": GOOGLE_OAUTH_CLIENT_ID,
@@ -794,7 +803,9 @@ def api_google_auth():
     flow.redirect_uri = GOOGLE_LOGIN_REDIRECT
     logger.info(f"[Google login] Sending redirect_uri to Google: {GOOGLE_LOGIN_REDIRECT}")
     url, state = flow.authorization_url(access_type="offline", prompt="consent")
+    # Store state in session for the callback (short-lived, same-request-origin)
     session["google_auth_state"] = state
+    session["google_auth_mode"] = mode
     session.permanent = True
     return jsonify({"auth_url": url})
 
@@ -802,8 +813,7 @@ def api_google_auth():
 @app.route("/api/auth/google/callback")
 def api_google_callback():
     state = session.get("google_auth_state")
-    logger.info(f"[Google callback] session_state_present={state is not None} "
-                f"cookies={list(request.cookies.keys())}")
+    logger.info(f"[Google callback] session_state_present={state is not None}")
     try:
         flow = Flow.from_client_config({
             "web": {
@@ -829,12 +839,11 @@ def api_google_callback():
             if not uid:
                 return flask_redirect(f"{FRONTEND_URL}/login?error=signup_failed")
             user = get_user_by_email(email)
-        session.clear()
-        session['user_id'] = user['id']
-        session['username'] = user['username']
-        session.permanent = True
-        logger.info(f"[Google login OK] user_id={user['id']} email={email}")
-        return flask_redirect(f"{FRONTEND_URL}/dashboard?login=success")
+
+        # ── KEY FIX: pass a JWT in the redirect URL instead of relying on cookies ──
+        token = make_token(user['id'], user['username'])
+        logger.info(f"[Google login OK] user_id={user['id']} email={email} — redirecting with JWT")
+        return flask_redirect(f"{FRONTEND_URL}/dashboard?token={token}")
     except Exception as e:
         logger.error(f"Google callback error: {e}\n{traceback.format_exc()}")
         return flask_redirect(f"{FRONTEND_URL}/login?error=google_failed")
@@ -855,12 +864,15 @@ def api_drive_connect():
     }, scopes=SCOPES)
     flow.redirect_uri = GOOGLE_DRIVE_REDIRECT
     url, state = flow.authorization_url(access_type='offline', prompt='consent')
+    # Store both the OAuth state AND the user_id in the session so the
+    # drive callback (a browser redirect, not XHR) can still identify the user.
     session['drive_auth_state'] = state
+    session['drive_user_id'] = request.user_id
     return jsonify({"auth_url": url})
 
 @app.route("/api/drive/callback")
 def api_drive_callback():
-    uid = session.get('user_id')
+    uid = session.get('drive_user_id') or session.get('user_id')
     state = session.get('drive_auth_state')
     if not uid:
         return flask_redirect(f"{FRONTEND_URL}/login?error=session_expired")
@@ -894,7 +906,7 @@ def api_drive_callback():
 @app.route("/api/drive/disconnect", methods=["POST"])
 @login_required
 def api_drive_disconnect():
-    uid = session['user_id']
+    uid = request.user_id
     update_user_state(uid, google_drive_credentials=None, drive_connected=False, spreadsheet_id=None)
     return jsonify({"message": "Drive disconnected"})
 
@@ -903,7 +915,7 @@ def api_drive_disconnect():
 @app.route("/api/upload/preview", methods=["POST"])
 @login_required
 def api_preview():
-    uid = session['user_id']
+    uid = request.user_id
     file = request.files.get("file")
     url_input = request.form.get("url", "").strip()
     text_input = request.form.get("text", "").strip()
@@ -942,7 +954,7 @@ def api_preview():
 @app.route("/api/upload/save", methods=["POST"])
 @login_required
 def api_save():
-    uid = session['user_id']
+    uid = request.user_id
     data = request.get_json()
     heading = data.get("heading", "").strip()
     description = data.get("description", "").strip()
@@ -1005,7 +1017,7 @@ def api_save():
 @app.route("/api/revisions/today")
 @login_required
 def api_today():
-    uid = session['user_id']
+    uid = request.user_id
     today = date.today().isoformat()
     cleanup_old_files(uid)
     r = supabase.table('revisions').select('*').eq('user_id', uid).eq('scheduled_date', today).eq('completed', False).order('stage').execute()
@@ -1014,7 +1026,7 @@ def api_today():
 @app.route("/api/revisions/overdue")
 @login_required
 def api_overdue():
-    uid = session['user_id']
+    uid = request.user_id
     today = date.today().isoformat()
     r = supabase.table('revisions').select('*').eq('user_id', uid).lt('scheduled_date', today).eq('completed', False).order('scheduled_date').execute()
     return jsonify([_build_revision(row) for row in r.data])
@@ -1022,7 +1034,7 @@ def api_overdue():
 @app.route("/api/revisions/completed")
 @login_required
 def api_completed():
-    uid = session['user_id']
+    uid = request.user_id
     today = date.today().isoformat()
     r = supabase.table('revisions').select('*').eq('user_id', uid).eq('completed_date', today).eq('completed', True).execute()
     return jsonify([_build_revision(row) for row in r.data])
@@ -1030,7 +1042,7 @@ def api_completed():
 @app.route("/api/revisions/upcoming")
 @login_required
 def api_upcoming():
-    uid = session['user_id']
+    uid = request.user_id
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
     r = supabase.table('revisions').select('*').eq('user_id', uid).gte('scheduled_date', tomorrow).eq('completed', False).order('scheduled_date').execute()
     revisions = [_build_revision(row) for row in r.data]
@@ -1043,7 +1055,7 @@ def api_upcoming():
 @app.route("/api/revisions/stats")
 @login_required
 def api_stats():
-    uid = session['user_id']
+    uid = request.user_id
     stats = get_revision_stats(uid)
     streak, _ = get_user_streak(uid)
     stats['streak'] = streak
@@ -1052,7 +1064,7 @@ def api_stats():
 @app.route("/api/revisions/<revision_id>/complete", methods=["POST"])
 @login_required
 def api_complete(revision_id):
-    uid = session['user_id']
+    uid = request.user_id
     r = supabase.table('revisions').select('learning_id', 'stage').eq('id', revision_id).eq('user_id', uid).execute()
     if not r.data:
         return jsonify({"error": "Not found"}), 404
@@ -1066,7 +1078,7 @@ def api_complete(revision_id):
 @app.route("/api/revisions/<revision_id>/postpone", methods=["POST"])
 @login_required
 def api_postpone(revision_id):
-    uid = session['user_id']
+    uid = request.user_id
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
     supabase.table('revisions').update({'scheduled_date': tomorrow}).eq('id', revision_id).eq('user_id', uid).execute()
     return jsonify({"message": "Postponed to tomorrow"})
@@ -1074,7 +1086,7 @@ def api_postpone(revision_id):
 @app.route("/api/revisions/<revision_id>/skip", methods=["POST"])
 @login_required
 def api_skip(revision_id):
-    uid = session['user_id']
+    uid = request.user_id
     r = supabase.table('revisions').select('scheduled_date').eq('id', revision_id).eq('user_id', uid).execute()
     if not r.data:
         return jsonify({"error": "Not found"}), 404
@@ -1088,7 +1100,7 @@ def api_skip(revision_id):
 @app.route("/api/learnings")
 @login_required
 def api_learnings():
-    uid = session['user_id']
+    uid = request.user_id
     r = supabase.table('learnings').select('*').eq('user_id', uid).order('created_at', desc=True).limit(50).execute()
     return jsonify(r.data)
 
@@ -1097,7 +1109,7 @@ def api_learnings():
 @app.route("/api/download/<path:supabase_path>")
 @login_required
 def api_download(supabase_path):
-    uid = session['user_id']
+    uid = request.user_id
     if not supabase_path.startswith(f"{uid}/"):
         return jsonify({"error": "Unauthorized"}), 403
     url = get_supabase_url(supabase_path)
