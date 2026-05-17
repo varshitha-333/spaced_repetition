@@ -100,9 +100,8 @@ NOTIFICATION_QUOTES = [
 ]
 
 app = Flask(__name__)
+# NOTE: premium blueprint is registered LATER, after decode_token is defined (see below).
 from premium_routes import premium_bp, init_premium
-init_premium(app, supabase, logger, decode_token)
-app.register_blueprint(premium_bp)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-to-a-strong-secret-in-production")
 
 # ProxyFix so request.is_secure is correct behind Render's load balancer
@@ -248,6 +247,14 @@ def make_token(user_id: str, username: str) -> str:
 def decode_token(token: str) -> dict:
     """Decode and validate a JWT. Raises pyjwt.InvalidTokenError on failure."""
     return pyjwt.decode(token, app.secret_key, algorithms=[JWT_ALGORITHM])
+
+
+# ════════════════════════════════════════════════════════════════
+#  REGISTER PREMIUM BLUEPRINT
+#  (must be done AFTER decode_token is defined, otherwise NameError)
+# ════════════════════════════════════════════════════════════════
+init_premium(app, supabase, logger, decode_token)
+app.register_blueprint(premium_bp)
 
 
 # ════════════════════════════════════════════════════════════════
