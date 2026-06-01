@@ -25,15 +25,14 @@ export default function Payment() {
   const [alreadyPremium, setAlreadyPremium] = useState(null);
 
   useEffect(() => {
-    getPremiumStatus().then(r => {
-      if (r.data?.is_premium) setAlreadyPremium(r.data);
-    }).catch(() => {});
+    getPremiumStatus()
+      .then(r => { if (r.data?.is_premium) setAlreadyPremium(r.data); })
+      .catch(() => {});
   }, []);
 
   const upper = form.coupon.toUpperCase();
   const couponValid = VALID_COUPONS.includes(upper);
   const finalPrice = couponValid ? 0 : 499;
-
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   const handlePay = async (e) => {
@@ -51,6 +50,7 @@ export default function Payment() {
       const r = await redeemPremium({
         name: form.name, email: form.email, phone: form.phone, coupon: upper,
       });
+      // ✅ FIX: store receipt first, then refresh user
       setReceipt(r.data.receipt);
       await refreshUser();
       toast.success('🎉 Premium activated for 30 days!');
@@ -61,7 +61,8 @@ export default function Payment() {
     }
   };
 
-  if (alreadyPremium) {
+  // ✅ FIX: only block if already premium AND no receipt yet (not after fresh redeem)
+  if (alreadyPremium && !receipt) {
     return (
       <div className="min-h-screen">
         <Navbar />
@@ -94,7 +95,6 @@ export default function Payment() {
               initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
               className="grid md:grid-cols-5 gap-6"
             >
-              {/* Form */}
               <form onSubmit={handlePay} className="card p-7 md:col-span-3">
                 <div className="pill-peach mb-4">🎁 30-day launch offer</div>
                 <h1 className="font-display text-2xl font-bold mb-1">Activate Premium</h1>
@@ -109,7 +109,8 @@ export default function Payment() {
                   </div>
                   <div>
                     <div className="label mb-1">Email</div>
-                    <input type="email" className="input" required value={form.email} onChange={e => set('email', e.target.value)} placeholder="you@college.edu" />
+                    <input type="email" className="input" required value={form.email}
+                      onChange={e => set('email', e.target.value)} placeholder="you@college.edu" />
                   </div>
                   <div className="sm:col-span-2">
                     <div className="label mb-1">Phone (for SMS reminders, optional)</div>
@@ -129,12 +130,8 @@ export default function Payment() {
                   </div>
                   <div className="flex flex-wrap gap-1.5 mt-2">
                     {VALID_COUPONS.map(c => (
-                      <button
-                        type="button"
-                        key={c}
-                        onClick={() => set('coupon', c)}
-                        className="text-xs bg-indigo-50 text-indigo-700 px-2 py-1 rounded hover:bg-indigo-100"
-                      >
+                      <button type="button" key={c} onClick={() => set('coupon', c)}
+                        className="text-xs bg-indigo-50 text-indigo-700 px-2 py-1 rounded hover:bg-indigo-100">
                         {c}
                       </button>
                     ))}
@@ -159,12 +156,8 @@ export default function Payment() {
                 <button type="submit" disabled={loading} className="btn-peach w-full mt-7 !py-3 text-base">
                   {loading ? 'Processing…' : `Pay ₹${finalPrice} & unlock Premium`}
                 </button>
-                <div className="text-xs text-ink-muted text-center mt-3">
-                  By continuing you agree this is a demo checkout for the launch campaign.
-                </div>
               </form>
 
-              {/* Summary */}
               <div className="md:col-span-2">
                 <div className="card p-6 sticky top-24">
                   <div className="font-semibold mb-4">Order summary</div>
@@ -182,20 +175,17 @@ export default function Payment() {
                     <span>Total</span>
                     <span>₹{finalPrice}</span>
                   </div>
-                  <div className="mt-5 text-xs text-ink-muted leading-relaxed">
-                    You'll get full Premium access for 30 days. After that, you'll automatically move to Free —
-                    we never auto-charge.
-                  </div>
                 </div>
               </div>
             </motion.div>
           ) : (
+            // ✅ FIX: receipt screen has working navigation to /premium
             <motion.div
               key="receipt"
               initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }}
               className="card p-10 text-center max-w-xl mx-auto"
             >
-              <div className="text-6xl mb-3 animate-pop">🎉</div>
+              <div className="text-6xl mb-3">🎉</div>
               <h1 className="font-display text-3xl font-bold mb-2">Premium activated!</h1>
               <p className="text-ink-muted mb-6">
                 You have full access for 30 days. Expires on{' '}
@@ -203,7 +193,6 @@ export default function Payment() {
                   {new Date(receipt.expires_at).toLocaleDateString(undefined, { dateStyle: 'long' })}
                 </span>.
               </p>
-
               <div className="card-quiet p-5 text-left text-sm font-mono mb-6">
                 <div className="flex justify-between"><span>Receipt</span><span>{receipt.id}</span></div>
                 <div className="flex justify-between"><span>Coupon</span><span>{receipt.coupon}</span></div>
@@ -211,8 +200,8 @@ export default function Payment() {
                 <div className="flex justify-between"><span>Email</span><span>{receipt.email}</span></div>
                 <div className="flex justify-between border-t border-indigo-100 mt-2 pt-2"><span>Total paid</span><span>₹0</span></div>
               </div>
-
               <div className="flex justify-center gap-3">
+                {/* ✅ FIX: use onClick navigate instead of Link to force fresh load */}
                 <button onClick={() => nav('/premium')} className="btn-primary">Open AI Lab →</button>
                 <button onClick={() => nav('/dashboard')} className="btn-secondary">Back to dashboard</button>
               </div>
