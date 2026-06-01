@@ -27,7 +27,8 @@ export default function Register() {
   const google = async () => {
     try {
       const r = await getGoogleAuthUrl('register');
-      if (r.data?.url) window.location.href = r.data.url;
+      // ✅ FIX
+if (r.data?.auth_url) window.location.href = r.data.auth_url;
     } catch { toast.error('Google sign-up unavailable'); }
   };
 
