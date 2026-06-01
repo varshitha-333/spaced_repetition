@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import {
@@ -8,14 +8,17 @@ import {
 import Navbar from '../components/Navbar';
 
 const tools = [
-  { k: 'summary',    icon: '📝', title: 'Smart Summary',     desc: '5 memorable bullets from any note.' },
+  { k: 'summary',    icon: '📝', title: 'Smart Summary',       desc: '5 memorable bullets from any note.' },
   { k: 'flashcards', icon: '🃏', title: 'Flashcard Generator', desc: '6 Q&A cards you can review forever.' },
-  { k: 'quiz',       icon: '🎯', title: 'Quiz Me',            desc: '5 MCQs with explanations.' },
-  { k: 'concepts',   icon: '🕸️', title: 'Concept Linker',     desc: 'Groups your saved resources.' },
+  { k: 'quiz',       icon: '🎯', title: 'Quiz Me',             desc: '5 MCQs with explanations.' },
+  { k: 'concepts',   icon: '🕸️', title: 'Concept Linker',      desc: 'Groups your saved resources.' },
 ];
 
 export default function PremiumLab() {
+  const nav = useNavigate();
+  // ✅ FIX: start as null (loading) not false, so we don't flash the locked screen
   const [premium, setPremium] = useState(null);
+  const [checking, setChecking] = useState(true);
   const [tool, setTool] = useState('summary');
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(false);
@@ -23,11 +26,23 @@ export default function PremiumLab() {
   const [titles, setTitles] = useState([]);
 
   useEffect(() => {
-    getPremiumStatus().then(r => setPremium(r.data));
-    getLearnings().then(r => {
-      const ts = (r.data?.learnings || []).map(l => l.heading || l.title).filter(Boolean);
-      setTitles(ts);
-    }).catch(() => {});
+    // ✅ FIX: always do a fresh fetch, never rely on cached token data
+    getPremiumStatus()
+      .then(r => {
+        setPremium(r.data);
+        setChecking(false);
+      })
+      .catch(() => {
+        setPremium({ is_premium: false });
+        setChecking(false);
+      });
+
+    getLearnings()
+      .then(r => {
+        const ts = (r.data || []).map(l => l.heading || l.title).filter(Boolean);
+        setTitles(ts);
+      })
+      .catch(() => {});
   }, []);
 
   const run = async () => {
@@ -40,7 +55,7 @@ export default function PremiumLab() {
         setResult({ type: 'concepts', data: r.data?.clusters || [] });
       } else {
         if (text.trim().length < 30) { toast.error('Paste at least a paragraph (30+ chars)'); setLoading(false); return; }
-        const r = tool === 'summary' ? await aiSummary(text)
+        const r = tool === 'summary'    ? await aiSummary(text)
                 : tool === 'flashcards' ? await aiFlashcards(text)
                 : await aiQuiz(text);
         setResult({
@@ -49,10 +64,25 @@ export default function PremiumLab() {
         });
       }
     } catch (e) {
-      if (e.response?.status === 402) toast.error('Premium required — claim 30 days free!');
-      else toast.error('AI call failed');
-    } finally { setLoading(false); }
+      if (e.response?.status === 402) {
+        toast.error('Premium required — claim 30 days free!');
+      } else {
+        toast.error('AI call failed — check your Gemini API key');
+      }
+    } finally {
+      setLoading(false);
+    }
   };
+
+  // ✅ FIX: show spinner while checking, not locked screen
+  if (checking) {
+    return (
+      <div className="min-h-screen">
+        <Navbar />
+        <div className="container-tight py-16 text-center text-ink-muted">Checking premium status…</div>
+      </div>
+    );
+  }
 
   if (premium && !premium.is_premium) {
     return (
@@ -62,8 +92,17 @@ export default function PremiumLab() {
           <div className="card p-10 text-center">
             <div className="text-5xl mb-3">🔒</div>
             <h1 className="font-display text-3xl font-bold mb-2">AI Lab is a Premium feature</h1>
-            <p className="text-ink-muted mb-5">Right now Premium is <b>free for 30 days</b>. Just enter a coupon at checkout.</p>
-            <Link to="/payment" className="btn-peach !py-3 !px-6">Claim Premium FREE →</Link>
+            <p className="text-ink-muted mb-5">
+              Right now Premium is <b>free for 30 days</b>. Just enter a coupon at checkout.
+            </p>
+            <div className="flex justify-center gap-3">
+              <Link to="/payment" className="btn-peach !py-3 !px-6">Claim Premium FREE →</Link>
+              {/* ✅ FIX: add refresh button in case premium was just claimed */}
+              <button onClick={() => { setChecking(true); getPremiumStatus().then(r => { setPremium(r.data); setChecking(false); }); }}
+                className="btn-secondary !py-3 !px-6">
+                Refresh status
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -80,6 +119,9 @@ export default function PremiumLab() {
             <h1 className="font-display text-3xl font-bold">Study faster with AI</h1>
             <p className="text-ink-muted text-sm">Paste any material → instant summary, flashcards, quiz, or concept map.</p>
           </div>
+          {premium?.days_left && (
+            <div className="text-xs text-ink-muted">{premium.days_left} days left</div>
+          )}
         </div>
 
         {/* Tool tabs */}
@@ -108,15 +150,13 @@ export default function PremiumLab() {
           ) : (
             <>
               <div className="label mb-1">Paste your study material</div>
-              <textarea
-                rows={7} className="input font-mono text-sm"
+              <textarea rows={7} className="input font-mono text-sm"
                 placeholder="Paste notes, a paragraph from a textbook, or a chapter outline…"
-                value={text} onChange={e => setText(e.target.value)}
-              />
+                value={text} onChange={e => setText(e.target.value)} />
             </>
           )}
           <button onClick={run} disabled={loading} className="btn-primary mt-4">
-            {loading ? '🪄 Generating…' : `Run ${tools.find(t => t.k === tool).title}`}
+            {loading ? '🪄 Generating…' : `Run ${tools.find(t => t.k === tool)?.title}`}
           </button>
         </div>
 
@@ -126,22 +166,19 @@ export default function PremiumLab() {
             {result.type === 'summary' && (
               <pre className="whitespace-pre-wrap text-sm leading-relaxed">{result.data}</pre>
             )}
-
             {result.type === 'flashcards' && (
               <div className="grid sm:grid-cols-2 gap-3">
-                {result.data.map((c, i) => <Flashcard key={i} q={c.q} a={c.a} />)}
+                {(result.data || []).map((c, i) => <Flashcard key={i} q={c.q} a={c.a} />)}
               </div>
             )}
-
             {result.type === 'quiz' && (
               <div className="space-y-4">
-                {result.data.map((q, i) => <Quiz q={q} key={i} idx={i + 1} />)}
+                {(result.data || []).map((q, i) => <Quiz q={q} key={i} idx={i + 1} />)}
               </div>
             )}
-
             {result.type === 'concepts' && (
               <div className="grid sm:grid-cols-2 gap-3">
-                {result.data.map((c, i) => (
+                {(result.data || []).map((c, i) => (
                   <div key={i} className="card-quiet p-4">
                     <div className="font-semibold text-indigo-700 mb-2">🧩 {c.concept}</div>
                     <ul className="text-sm space-y-1">
@@ -175,7 +212,7 @@ function Quiz({ q, idx }) {
     <div className="card-quiet p-4">
       <div className="font-semibold mb-2">{idx}. {q.q}</div>
       <div className="grid grid-cols-1 gap-2">
-        {q.options.map((opt, i) => {
+        {(q.options || []).map((opt, i) => {
           const isPicked = picked === i;
           const isAnswer = q.answer_index === i;
           let cls = 'text-left text-sm px-3 py-2 rounded-lg border transition';
