@@ -18,57 +18,111 @@ export default function Profile() {
   const [review, setReview] = useState({ rating: 5, text: '' });
   const [tab, setTab] = useState('profile');
 
-  const load = () => getProfile().then(r => {
-    setP(r.data);
-    setForm({
-      display_name: r.data.display_name || '',
-      email: r.data.email || '',
-      phone: r.data.phone || '',
-    });
-    setSms({ enabled: !!r.data.sms_enabled, phone: r.data.phone || '' });
-  });
+  const load = async () => {
+    try {
+      const r = await getProfile();
+      const data = r.data;
+      setP(data);
+      setForm({
+        display_name: data.display_name || '',
+        email: data.email || '',
+        // ✅ FIX: profile returns 'phone' key
+        phone: data.phone || '',
+      });
+      // ✅ FIX: sync SMS state from profile on load
+      setSms({
+        enabled: !!data.sms_enabled,
+        phone: data.phone || '',
+      });
+    } catch (e) {
+      toast.error('Failed to load profile');
+    }
+  };
 
   useEffect(() => { load(); }, []);
 
   const saveProfile = async () => {
-    try { await updateProfile(form); toast.success('Profile saved'); load(); refreshUser(); }
-    catch (e) { toast.error(e.response?.data?.error || 'Failed'); }
+    try {
+      await updateProfile(form);
+      toast.success('Profile saved ✓');
+      load();
+      refreshUser();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to save');
+    }
   };
 
   const saveSms = async () => {
-    if (sms.enabled && !sms.phone.trim()) { toast.error('Phone required'); return; }
+    if (sms.enabled && !sms.phone.trim()) {
+      toast.error('Phone number required to enable SMS');
+      return;
+    }
     try {
       const r = await enableSms(sms.phone.trim(), sms.enabled);
-      toast.success(r.data.sms?.mode === 'real' ? 'SMS settings saved (real)' : 'Saved (mock mode)');
-      load(); refreshUser();
-    } catch (e) { toast.error('Failed'); }
+      const mode = r.data.sms?.mode;
+      toast.success(mode === 'real' ? 'SMS settings saved!' : 'SMS settings saved (mock mode — add Twilio env vars for real SMS)');
+      // ✅ FIX: also save phone to profile so it persists visibly
+      if (sms.phone.trim()) {
+        await updateProfile({ phone: sms.phone.trim() });
+      }
+      load();
+      refreshUser();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to save SMS settings');
+    }
   };
 
   const sendTest = async () => {
-    try { const r = await testSms(); toast.success(`Sent (${r.data.sms?.mode})`); }
-    catch (e) { toast.error(e.response?.data?.error || 'Failed'); }
+    try {
+      const r = await testSms();
+      toast.success(`Test SMS sent (${r.data.sms?.mode})`);
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to send test');
+    }
   };
 
   const handleDrive = async () => {
     if (p.drive_connected) {
-      await disconnectDrive(); toast('Drive disconnected', { icon: '🔗' });
-      load(); refreshUser();
+      try {
+        await disconnectDrive();
+        toast('Drive disconnected', { icon: '🔗' });
+        load();
+        refreshUser();
+      } catch {
+        toast.error('Failed to disconnect');
+      }
     } else {
-      const r = await connectDrive();
-      const url = r.data?.auth_url; if (url) window.location.href = url;
+      try {
+        const r = await connectDrive();
+        // ✅ FIX: backend returns auth_url not url
+        const url = r.data?.auth_url || r.data?.url;
+        if (url) window.location.href = url;
+        else toast.error('Could not get Drive auth URL');
+      } catch {
+        toast.error('Failed to connect Drive');
+      }
     }
   };
 
   const sendReview = async () => {
-    if (review.text.trim().length < 10) { toast.error('Write a bit more 🙂'); return; }
+    if (review.text.trim().length < 10) {
+      toast.error('Write a bit more 🙂');
+      return;
+    }
     try {
       const r = await submitReview(review.rating, review.text, form.display_name || undefined);
       toast.success(`Thanks! Quality score ${r.data.quality_score}/10`);
       setReview({ rating: 5, text: '' });
-    } catch (e) { toast.error(e.response?.data?.error || 'Failed'); }
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to submit review');
+    }
   };
 
-  if (!p) return null;
+  if (!p) return (
+    <div className="min-h-screen flex items-center justify-center">
+      <div className="text-ink-muted">Loading profile…</div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen">
@@ -108,10 +162,10 @@ export default function Profile() {
         {/* Tabs */}
         <div className="flex gap-1 mb-5 card-quiet p-1 w-fit">
           {[
-            { k: 'profile',  l: '👤 Profile' },
-            { k: 'sms',      l: '📱 SMS reminders' },
-            { k: 'drive',    l: '🔗 Google Drive' },
-            { k: 'review',   l: '⭐ Leave a review' },
+            { k: 'profile', l: '👤 Profile' },
+            { k: 'sms',     l: '📱 SMS reminders' },
+            { k: 'drive',   l: '🔗 Google Drive' },
+            { k: 'review',  l: '⭐ Leave a review' },
           ].map(t => (
             <button key={t.k} onClick={() => setTab(t.k)}
               className={`px-3 py-1.5 rounded-lg text-sm transition ${tab === t.k ? 'bg-white shadow-soft text-ink font-semibold' : 'text-ink-soft hover:text-ink'}`}>
@@ -124,9 +178,13 @@ export default function Profile() {
         {tab === 'profile' && (
           <div className="card p-6 space-y-4">
             <Field label="Username" value={p.username} disabled />
-            <Field label="Display name" value={form.display_name} onChange={v => setForm({ ...form, display_name: v })} />
-            <Field label="Email" value={form.email} onChange={v => setForm({ ...form, email: v })} />
-            <Field label="Phone (for SMS)" value={form.phone} onChange={v => setForm({ ...form, phone: v })} />
+            <Field label="Display name" value={form.display_name}
+              onChange={v => setForm({ ...form, display_name: v })} />
+            <Field label="Email" value={form.email}
+              onChange={v => setForm({ ...form, email: v })} />
+            <Field label="Phone (for SMS)" value={form.phone}
+              onChange={v => setForm({ ...form, phone: v })}
+              placeholder="+91 9876543210" />
             <button onClick={saveProfile} className="btn-primary">Save changes</button>
           </div>
         )}
@@ -137,22 +195,30 @@ export default function Profile() {
             <div>
               <div className="font-semibold mb-1">Daily SMS reminders</div>
               <div className="text-sm text-ink-muted">
-                Two calm nudges per day. Morning at <b>8 AM</b> (what to revise) · Night at <b>9 PM</b> (how it went).
+                Two calm nudges per day. Morning at <b>8 AM</b> · Night at <b>9 PM</b>.
               </div>
             </div>
-
             <label className="flex items-center gap-3 cursor-pointer">
-              <input type="checkbox" checked={sms.enabled} onChange={e => setSms({ ...sms, enabled: e.target.checked })} className="w-5 h-5 accent-indigo-600" />
+              <input type="checkbox" checked={sms.enabled}
+                onChange={e => setSms({ ...sms, enabled: e.target.checked })}
+                className="w-5 h-5 accent-indigo-600" />
               <span>Enable SMS reminders</span>
             </label>
-            <Field label="SMS number" value={sms.phone} onChange={v => setSms({ ...sms, phone: v })} placeholder="+91 9876543210" />
-
+            <Field label="SMS number" value={sms.phone}
+              onChange={v => setSms({ ...sms, phone: v })}
+              placeholder="+91 9876543210" />
             <div className="flex flex-wrap gap-2">
               <button onClick={saveSms} className="btn-primary">Save SMS settings</button>
               <button onClick={sendTest} className="btn-secondary">Send test SMS</button>
             </div>
+            {/* ✅ Show current saved state */}
+            {p.sms_enabled && p.phone && (
+              <div className="text-xs text-emerald-700 bg-emerald-50 rounded-lg p-2">
+                ✓ SMS enabled for {p.phone}
+              </div>
+            )}
             <div className="text-xs text-ink-muted">
-              Twilio mode is automatic: real SMS when env vars set, otherwise mock-logged on the server.
+              Real SMS requires Twilio env vars. Otherwise mock-logged on the server.
             </div>
           </div>
         )}
@@ -167,18 +233,13 @@ export default function Profile() {
                 <div className="text-sm text-ink-muted">
                   {p.drive_connected
                     ? "We sync your saved resources to a 'LearnFlow' folder in your own Drive."
-                    : "Connect to sync uploads to your own Drive folder automatically."}
+                    : 'Connect to sync uploads to your own Drive folder automatically.'}
                 </div>
               </div>
               <button onClick={handleDrive} className={p.drive_connected ? 'btn-secondary' : 'btn-primary'}>
                 {p.drive_connected ? 'Disconnect' : 'Connect Drive'}
               </button>
             </div>
-            {p.drive_connected && (
-              <div className="text-xs text-emerald-700 bg-emerald-50 rounded-lg p-3">
-                Status is live — pulled from your saved credentials. If you see "not connected" elsewhere, refresh the page.
-              </div>
-            )}
           </div>
         )}
 
@@ -187,7 +248,7 @@ export default function Profile() {
           <div className="card p-6 space-y-4">
             <div>
               <div className="font-semibold mb-1">Leave a review</div>
-              <div className="text-sm text-ink-muted">Top reviews (Gemini-scored) appear on our landing page.</div>
+              <div className="text-sm text-ink-muted">Top reviews appear on our landing page.</div>
             </div>
             <div>
               <div className="label mb-1">Your rating</div>
@@ -202,8 +263,10 @@ export default function Profile() {
             </div>
             <div>
               <div className="label mb-1">Your review</div>
-              <textarea rows={4} className="input" placeholder="What made LearnFlow click for you?"
-                value={review.text} onChange={e => setReview({ ...review, text: e.target.value })} />
+              <textarea rows={4} className="input"
+                placeholder="What made LearnFlow click for you?"
+                value={review.text}
+                onChange={e => setReview({ ...review, text: e.target.value })} />
             </div>
             <button onClick={sendReview} className="btn-primary">Submit review</button>
           </div>
