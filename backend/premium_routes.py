@@ -43,7 +43,7 @@ _decode_token = None
 VALID_COUPONS = {"LAUNCH30", "STUDENT30", "FIRST100", "LEARNFREE"}
 PREMIUM_DAYS = 30
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 GEMINI_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 )
