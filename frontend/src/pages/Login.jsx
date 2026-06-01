@@ -33,7 +33,7 @@ export default function Login() {
   const google = async () => {
     try {
       const r = await getGoogleAuthUrl('login');
-      if (r.data?.url) window.location.href = r.data.url;
+if (r.data?.auth_url) window.location.href = r.data.auth_url;
     } catch { toast.error('Google login unavailable'); }
   };
 
