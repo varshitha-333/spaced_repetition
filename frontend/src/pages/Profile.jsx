@@ -55,7 +55,7 @@ export default function Profile() {
       load(); refreshUser();
     } else {
       const r = await connectDrive();
-      const url = r.data?.url; if (url) window.location.href = url;
+      const url = r.data?.auth_url; if (url) window.location.href = url;
     }
   };
 
