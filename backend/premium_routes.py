@@ -555,6 +555,83 @@ def ai_concepts():
     return jsonify({"clusters": clusters[:6]})
 
 
+# ---------------------------------------------------------------------------
+# NEW Premium feature — AI Auto-Process for uploaded PDFs / text
+# When a Premium student uploads, the front-end calls this with the saved
+# learning_id. It builds:  Markdown notes → 5-bullet summary → mind-map JSON
+# → 6 flashcards, all in one Gemini round, and stores them on the learning row.
+# ---------------------------------------------------------------------------
+@premium_bp.route("/api/ai/auto-process", methods=["POST"])
+@require_auth
+def ai_auto_process():
+    u = request.current_user
+    st = _get_premium_state(u["id"])
+    if not st["is_premium"]:
+        return jsonify({"error": "premium_required"}), 402
+    data = request.get_json(silent=True) or {}
+    learning_id = data.get("learning_id")
+    if not learning_id:
+        return jsonify({"error": "missing_learning_id"}), 400
+    try:
+        row = _supabase.table("learnings").select("*").eq("id", learning_id).eq("user_id", u["id"]).execute()
+    except Exception as e:
+        return jsonify({"error": f"db: {e}"}), 500
+    if not row.data:
+        return jsonify({"error": "not_found"}), 404
+    learning = row.data[0]
+    base_text = (learning.get("content") or learning.get("title") or "")[:6000]
+    if not base_text.strip():
+        return jsonify({"error": "no_content"}), 400
+
+    markdown = _gemini_generate(
+        f"Convert this study material into clean Markdown notes. Use ##, ###, "
+        f"bullet points, and **bold** for key terms. No preamble.\n\n{base_text}",
+        system="You are a study-note formatter. Output Markdown only.",
+    ) or f"## {learning.get('title','Notes')}\n\n{base_text}"
+
+    summary = _gemini_generate(
+        f"Summarize in EXACTLY 5 short bullets a student can memorize. "
+        f"Each bullet ≤ 18 words. Plain text.\n\n{base_text}",
+        system="Tight study-buddy summaries.",
+    ) or "• Summary unavailable (set GEMINI_API_KEY)"
+
+    mindmap_text = _gemini_generate(
+        f'Build a mind-map of this material as STRICT JSON: '
+        f'{{"root":"...","branches":[{{"label":"...","children":["...","..."]}}]}}. '
+        f'3-5 top branches. No commentary.\n\n{base_text}',
+        system="Mind-map JSON generator. JSON only.",
+    )
+    try:
+        s, e = mindmap_text.find("{"), mindmap_text.rfind("}")
+        mindmap = json.loads(mindmap_text[s:e+1]) if (s != -1 and e != -1) else {}
+    except Exception:
+        mindmap = {"root": learning.get("title", "Notes"), "branches": []}
+
+    cards_text = _gemini_generate(
+        f'Make 6 flashcards as STRICT JSON: [{{"q":"...","a":"..."}}].\n\n{base_text}',
+        system="Flashcard generator. JSON only.",
+    )
+    try:
+        s, e = cards_text.find("["), cards_text.rfind("]")
+        flashcards = json.loads(cards_text[s:e+1]) if (s != -1 and e != -1) else []
+    except Exception:
+        flashcards = []
+
+    artefact = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "markdown":   markdown[:20000],
+        "summary":    summary,
+        "mindmap":    mindmap,
+        "flashcards": flashcards[:6],
+    }
+    try:
+        _supabase.table("learnings").update({"ai_artifacts": artefact}).eq("id", learning_id).execute()
+    except Exception as e:
+        _logger.warning(f"[AUTO-PROC] could not save ai_artifacts (column missing?): {e}")
+
+    return jsonify({"ok": True, "artifacts": artefact})
+
+
 @premium_bp.route("/api/ai/streak-coach", methods=["POST"])
 @require_auth
 def ai_streak_coach():
@@ -603,4 +680,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     created_at timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_reviews_quality ON reviews (quality_score DESC, rating DESC);
+
+-- NEW: Premium AI auto-process artefacts (markdown, mindmap, summary, flashcards)
+ALTER TABLE learnings ADD COLUMN IF NOT EXISTS ai_artifacts jsonb;
 """

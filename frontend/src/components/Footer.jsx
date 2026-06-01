@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 export default function Footer() {
   return (
     <footer className="mt-20 border-t border-white/60 bg-white/40 backdrop-blur-md">
-      <div className="container-page py-10 grid md:grid-cols-3 gap-8 text-sm">
+      <div className="container-page py-10 grid md:grid-cols-4 gap-8 text-sm">
         <div>
           <div className="flex items-center gap-2 mb-3">
             <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-peach-400 flex items-center justify-center text-white">📚</div>
@@ -13,6 +13,7 @@ export default function Footer() {
             Spaced repetition that finally feels calm. Built for students who want to remember what they learn — not just collect notes.
           </p>
         </div>
+
         <div>
           <div className="font-semibold mb-3">Product</div>
           <ul className="space-y-1.5 text-ink-soft">
@@ -21,6 +22,17 @@ export default function Footer() {
             <li><Link to="/register" className="hover:text-indigo-600">Get started free</Link></li>
           </ul>
         </div>
+
+        {/* Legal links — REQUIRED public pages for Google OAuth verification */}
+        <div>
+          <div className="font-semibold mb-3">Legal</div>
+          <ul className="space-y-1.5 text-ink-soft">
+            <li><Link to="/privacy" className="hover:text-indigo-600">Privacy Policy</Link></li>
+            <li><Link to="/terms"   className="hover:text-indigo-600">Terms of Service</Link></li>
+            <li><a href="mailto:learnflow.app@gmail.com" className="hover:text-indigo-600">Contact us</a></li>
+          </ul>
+        </div>
+
         <div>
           <div className="font-semibold mb-3">Launch offer 🎁</div>
           <p className="text-ink-muted mb-3">Premium is free for the first 30 days. Use any of these codes at checkout:</p>
@@ -32,7 +44,7 @@ export default function Footer() {
         </div>
       </div>
       <div className="text-center text-xs text-ink-muted py-4 border-t border-white/60">
-        © {new Date().getFullYear()} LearnFlow · Made with care for students.
+        © {new Date().getFullYear()} LearnFlow · Made with care for students. · <Link to="/privacy" className="hover:text-indigo-600">Privacy</Link> · <Link to="/terms" className="hover:text-indigo-600">Terms</Link>
       </div>
     </footer>
   );

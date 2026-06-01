@@ -5,7 +5,7 @@ import toast from 'react-hot-toast';
 import {
   getTodayRevisions, getOverdueRevisions, getRevisionStats,
   completeRevision, postponeRevision,
-  getPremiumStatus, enableSms, aiStreakCoach,
+  getPremiumStatus, aiStreakCoach,
 } from '../services/api';
 import { useAuth } from '../hooks/useAuth';
 import Navbar from '../components/Navbar';
@@ -13,7 +13,7 @@ import Navbar from '../components/Navbar';
 const tone = (n) => n === 0 ? 'sage' : n < 3 ? 'indigo' : 'peach';
 
 export default function Dashboard() {
-  const { user, refreshUser } = useAuth();
+  const { user } = useAuth();
   const nav = useNavigate();
 
   const [today, setToday] = useState([]);
@@ -22,8 +22,6 @@ export default function Dashboard() {
   const [premium, setPremium] = useState(null);
   const [coachMsg, setCoachMsg] = useState('');
   const [busy, setBusy] = useState(null);
-  const [showSms, setShowSms] = useState(false);
-  const [smsPhone, setSmsPhone] = useState(user?.notification_phone || '');
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -31,6 +29,7 @@ export default function Dashboard() {
       const [t, o, s, p] = await Promise.all([
         getTodayRevisions(), getOverdueRevisions(), getRevisionStats(), getPremiumStatus(),
       ]);
+      // FIX: backend now returns { revisions: [...] } for all revision endpoints.
       setToday(t.data?.revisions || []);
       setOverdue(o.data?.revisions || []);
       setStats(s.data || null);
@@ -44,11 +43,10 @@ export default function Dashboard() {
 
   useEffect(() => { load(); }, [load]);
 
-  // Streak coach (premium-only) — fetch a Gemini-written line once data is ready
   useEffect(() => {
     if (!premium?.is_premium || !stats) return;
     aiStreakCoach({
-      streak: stats.current_streak || 0,
+      streak: stats.current_streak || stats.streak || 0,
       done_today: stats.completed_today || 0,
       due_today: today.length,
     }).then(r => setCoachMsg(r.data?.message || '')).catch(() => {});
@@ -56,42 +54,26 @@ export default function Dashboard() {
 
   const handleComplete = async (id) => {
     setBusy(id);
-    try {
-      await completeRevision(id);
-      toast.success('Nice — locked in. 🎯');
-      load();
-    } catch { toast.error('Could not save'); }
-    finally { setBusy(null); }
+    try { await completeRevision(id); toast.success('Nice — locked in. 🎯'); load(); }
+    catch { toast.error('Could not save'); } finally { setBusy(null); }
   };
   const handlePostpone = async (id) => {
     setBusy(id);
-    try {
-      await postponeRevision(id);
-      toast('Pushed to tomorrow', { icon: '⏭️' });
-      load();
-    } catch { toast.error('Could not postpone'); }
-    finally { setBusy(null); }
-  };
-
-  const handleEnableSms = async () => {
-    if (!smsPhone.trim()) { toast.error('Enter your phone number'); return; }
-    try {
-      const r = await enableSms(smsPhone.trim(), true);
-      toast.success(r.data.sms?.mode === 'real' ? 'SMS reminders enabled!' : 'Enabled (mock — set Twilio env vars for real SMS)');
-      setShowSms(false);
-      refreshUser();
-    } catch (e) { toast.error(e.response?.data?.error || 'Failed'); }
+    try { await postponeRevision(id); toast('Pushed to tomorrow', { icon: '⏭️' }); load(); }
+    catch { toast.error('Could not postpone'); } finally { setBusy(null); }
   };
 
   const driveConnected = !!user?.drive_connected;
   const totalDue = today.length + overdue.length;
   const allDone = !loading && totalDue === 0;
+  // FIX: use current_streak (new alias) with fallback to streak; total_learnings now present.
+  const currentStreak = stats?.current_streak ?? stats?.streak ?? 0;
+  const totalSaved    = stats?.total_learnings ?? 0;
 
   return (
     <div className="min-h-screen">
       <Navbar />
 
-      {/* ─────────── Premium ribbon ─────────── */}
       {premium && !premium.is_premium && premium.campaign_active && (
         <div className="bg-gradient-to-r from-indigo-600 via-indigo-500 to-peach-500 text-white text-sm py-2 px-4 text-center">
           🎁 Launch offer · Premium is <b>FREE for 30 days</b>.{' '}
@@ -106,7 +88,6 @@ export default function Dashboard() {
       )}
 
       <div className="container-page py-8">
-        {/* ─────────── Heading + Streak ─────────── */}
         <motion.div
           initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
           className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-8"
@@ -123,13 +104,12 @@ export default function Dashboard() {
             )}
           </div>
           <div className="flex gap-3">
-            <Stat label="Streak" value={`${stats?.current_streak || 0}🔥`} tone="peach" />
-            <Stat label="Done today" value={stats?.completed_today ?? 0} tone="sage" />
-            <Stat label="Saved" value={stats?.total_learnings ?? 0} tone="indigo" />
+            <Stat label="Streak"     value={`${currentStreak}🔥`}                tone="peach" />
+            <Stat label="Done today" value={stats?.completed_today ?? 0}         tone="sage" />
+            <Stat label="Saved"      value={totalSaved}                          tone="indigo" />
           </div>
         </motion.div>
 
-        {/* ─────────── Today's focus ─────────── */}
         <section className="mb-8">
           <SectionHeader title="Today's revisions" badge={`${today.length}`} tone={tone(today.length)} action={<Link to="/today" className="btn-ghost text-sm">See full focus mode →</Link>} />
           {loading ? <SkeletonRows /> : today.length === 0 ? (
@@ -143,7 +123,6 @@ export default function Dashboard() {
           )}
         </section>
 
-        {/* ─────────── Overdue ─────────── */}
         {overdue.length > 0 && (
           <section className="mb-8">
             <SectionHeader title="Catching up" badge={`${overdue.length} overdue`} tone="peach" />
@@ -155,7 +134,6 @@ export default function Dashboard() {
           </section>
         )}
 
-        {/* ─────────── Quick actions ─────────── */}
         <section className="grid md:grid-cols-3 gap-4 mb-8">
           <QuickCard
             tone="indigo" icon="📥"
@@ -166,10 +144,10 @@ export default function Dashboard() {
           />
           <QuickCard
             tone="peach" icon="📱"
-            title="Enable SMS reminders"
-            desc="One number, two friendly nudges per day. 8 AM + 9 PM."
-            cta={user?.sms_notifications_enabled ? 'Manage' : 'Turn on'}
-            onClick={() => setShowSms(true)}
+            title="SMS reminders"
+            desc="Enable in your profile — one number, two friendly nudges per day."
+            cta={user?.sms_notifications_enabled ? 'Manage' : 'Set up'}
+            onClick={() => nav('/profile')}
           />
           <QuickCard
             tone="sage" icon={driveConnected ? '✅' : '🔗'}
@@ -180,7 +158,6 @@ export default function Dashboard() {
           />
         </section>
 
-        {/* ─────────── Premium teaser (only if not premium) ─────────── */}
         {!premium?.is_premium && (
           <motion.div
             initial={{ opacity: 0, y: 10 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }}
@@ -204,40 +181,10 @@ export default function Dashboard() {
           </motion.div>
         )}
       </div>
-
-      {/* ─────────── SMS modal ─────────── */}
-      {showSms && (
-        <div className="fixed inset-0 z-50 bg-ink/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
-            className="card p-6 max-w-md w-full"
-          >
-            <div className="text-2xl mb-2">📱</div>
-            <h3 className="font-display text-xl font-bold mb-1">Enable SMS reminders</h3>
-            <p className="text-sm text-ink-muted mb-4">
-              You'll get a calm nudge at <b>8 AM</b> with what to revise, and a quick recap at <b>9 PM</b>.
-            </p>
-            <input
-              className="input mb-4" placeholder="+91 9876543210" value={smsPhone}
-              onChange={e => setSmsPhone(e.target.value)}
-            />
-            {!user?.twilio_configured && (
-              <div className="text-xs text-amber-700 bg-amber-50 rounded-lg p-2 mb-3">
-                Twilio env vars not set on server — SMS will run in mock mode (logged to console).
-              </div>
-            )}
-            <div className="flex gap-2">
-              <button onClick={() => setShowSms(false)} className="btn-secondary flex-1">Cancel</button>
-              <button onClick={handleEnableSms} className="btn-primary flex-1">Turn on</button>
-            </div>
-          </motion.div>
-        </div>
-      )}
     </div>
   );
 }
 
-/* ─────────── small helpers ─────────── */
 function greet() {
   const h = new Date().getHours();
   if (h < 12) return 'morning'; if (h < 18) return 'afternoon'; return 'evening';
@@ -254,7 +201,6 @@ function Stat({ label, value, tone }) {
     </div>
   );
 }
-
 function SectionHeader({ title, badge, tone = 'indigo', action }) {
   const cls = tone === 'peach' ? 'pill-peach' : tone === 'sage' ? 'pill-sage' : 'pill-indigo';
   return (
@@ -266,7 +212,6 @@ function SectionHeader({ title, badge, tone = 'indigo', action }) {
     </div>
   );
 }
-
 function SkeletonRows() {
   return (
     <div className="grid md:grid-cols-2 gap-3">
@@ -279,7 +224,6 @@ function SkeletonRows() {
     </div>
   );
 }
-
 function EmptyToday() {
   return (
     <div className="card p-8 text-center">
@@ -290,7 +234,6 @@ function EmptyToday() {
     </div>
   );
 }
-
 function RevisionCard({ r, overdue, onDone, onLater, busy }) {
   return (
     <div className={`card p-4 card-hover ${overdue ? 'border-peach-200/80 bg-peach-50/40' : ''}`}>
@@ -298,9 +241,10 @@ function RevisionCard({ r, overdue, onDone, onLater, busy }) {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1.5">
             <span className={overdue ? 'pill-peach' : 'pill-indigo'}>
-              {overdue ? 'Overdue' : `Day ${r.day_number || ''}`}
+              {overdue ? 'Overdue' : `Day ${r.stage || r.day_number || ''}`}
             </span>
             {r.url && <a href={r.url} target="_blank" rel="noreferrer" className="text-xs text-indigo-600 hover:underline truncate">open ↗</a>}
+            {r.supabase_url && <a href={r.supabase_url} target="_blank" rel="noreferrer" className="text-xs text-indigo-600 hover:underline">file ↗</a>}
           </div>
           <div className="font-semibold text-ink truncate">{r.heading || r.title || 'Untitled'}</div>
           {r.description && <div className="text-sm text-ink-muted line-clamp-2 mt-1">{r.description}</div>}
@@ -315,7 +259,6 @@ function RevisionCard({ r, overdue, onDone, onLater, busy }) {
     </div>
   );
 }
-
 function QuickCard({ tone, icon, title, desc, cta, onClick }) {
   const bg = tone === 'peach' ? 'from-peach-50 to-cream-50'
     : tone === 'sage' ? 'from-emerald-50 to-cream-50'

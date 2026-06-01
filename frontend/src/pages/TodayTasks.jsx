@@ -14,7 +14,9 @@ export default function TodayTasks() {
 
   const load = useCallback(() => {
     getTodayRevisions().then(r => {
-      setItems(r.data?.revisions || []);
+      // Accept both shapes — { revisions: [...] } (new) and bare array (legacy)
+      const arr = Array.isArray(r.data) ? r.data : (r.data?.revisions || []);
+      setItems(arr);
       setIdx(0);
     });
   }, []);
@@ -52,7 +54,7 @@ export default function TodayTasks() {
         <div className="text-sm text-ink-muted mb-2">Focus mode · {idx + 1} of {items.length}</div>
         <motion.div key={current.id} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
           className="card p-8">
-          <div className="pill-indigo mb-3">Day {current.day_number || '?'}</div>
+          <div className="pill-indigo mb-3">Day {current.stage || current.day_number || '?'}</div>
           <h2 className="font-display text-2xl font-bold mb-2">{current.heading || 'Untitled'}</h2>
           {current.description && <p className="text-ink-muted leading-relaxed">{current.description}</p>}
           {current.url && (

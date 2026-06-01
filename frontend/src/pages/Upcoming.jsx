@@ -9,7 +9,10 @@ export default function Upcoming() {
 
   useEffect(() => {
     getUpcomingRevisions()
-      .then(r => setItems(r.data?.revisions || []))
+      .then(r => {
+        const arr = Array.isArray(r.data) ? r.data : (r.data?.revisions || []);
+        setItems(arr);
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
@@ -50,7 +53,7 @@ export default function Upcoming() {
                   {grouped[d].map(r => (
                     <div key={r.id} className="card p-4">
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="pill-indigo">Day {r.day_number}</span>
+                        <span className="pill-indigo">Day {r.stage || r.day_number}</span>
                       </div>
                       <div className="font-semibold truncate">{r.heading || 'Untitled'}</div>
                       {r.description && <div className="text-sm text-ink-muted line-clamp-2 mt-1">{r.description}</div>}

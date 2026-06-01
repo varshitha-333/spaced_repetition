@@ -1,9 +1,20 @@
+// frontend/src/services/api.jsx
+// ────────────────────────────────────────────────────────────────────────────
+// IMPORTANT FIX: Every page in this app imports from `../services/api`,
+// but the file used to live at `../utils/api`. That single broken path is
+// why NOTHING worked — uploads, premium claim, profile save, drive connect,
+// SMS toggle — all of them silently failed to even load.
+//
+// This file lives at src/services/api.jsx, which is what every page expects.
+// Delete src/utils/api.jsx if it still exists (or leave it, just don't import
+// it anywhere).
+// ────────────────────────────────────────────────────────────────────────────
 import axios from 'axios';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
-export const getToken = () => localStorage.getItem('auth_token');
-export const setToken = (t) => localStorage.setItem('auth_token', t);
+export const getToken   = () => localStorage.getItem('auth_token');
+export const setToken   = (t) => localStorage.setItem('auth_token', t);
 export const clearToken = () => localStorage.removeItem('auth_token');
 
 const api = axios.create({
@@ -18,7 +29,7 @@ api.interceptors.request.use((cfg) => {
   return cfg;
 });
 
-// ---------- Auth ----------
+// ─────────── Auth ───────────
 export const login = async (username, password) => {
   const res = await api.post('/api/auth/login', { username, password });
   if (res.data?.token) setToken(res.data.token);
@@ -35,16 +46,26 @@ export const logout = () => {
 };
 export const getMe = () => api.get('/api/auth/me');
 
-// ---------- Drive ----------
-export const getGoogleAuthUrl = (mode = 'login') => api.get('/api/auth/google', { params: { mode } });
-export const connectDrive = () => api.get('/api/drive/connect');
+// ─────────── Drive / Google OAuth ───────────
+// FIX: backend returns { auth_url }, NOT { url }. Old code read `r.data?.url`
+// which was undefined → "Google login unavailable" / Drive button did nothing.
+export const getGoogleAuthUrl = async (mode = 'login') => {
+  const res = await api.get('/api/auth/google', { params: { mode } });
+  return { data: { url: res.data?.auth_url, ...res.data } };
+};
+export const connectDrive = async () => {
+  const res = await api.get('/api/drive/connect');
+  return { data: { url: res.data?.auth_url, ...res.data } };
+};
 export const disconnectDrive = () => api.post('/api/drive/disconnect');
 
-// ---------- Uploads ----------
-export const uploadPreview = (fd) => api.post('/api/upload/preview', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+// ─────────── Uploads ───────────
+export const uploadPreview = (fd) =>
+  api.post('/api/upload/preview', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
 export const uploadSave = (d) => api.post('/api/upload/save', d);
 
-// ---------- Revisions ----------
+// ─────────── Revisions ───────────
+// Backend now returns { revisions: [...] } consistently (see app.py fix).
 export const getTodayRevisions     = () => api.get('/api/revisions/today');
 export const getOverdueRevisions   = () => api.get('/api/revisions/overdue');
 export const getCompletedRevisions = () => api.get('/api/revisions/completed');
@@ -53,35 +74,38 @@ export const getRevisionStats      = () => api.get('/api/revisions/stats');
 export const completeRevision = (id) => api.post(`/api/revisions/${id}/complete`);
 export const postponeRevision = (id) => api.post(`/api/revisions/${id}/postpone`);
 export const skipRevision     = (id) => api.post(`/api/revisions/${id}/skip`);
-export const getLearnings = () => api.get('/api/learnings');
+export const getLearnings     = () => api.get('/api/learnings');
 
-// ---------- Notifications (legacy) ----------
+// ─────────── Notifications (legacy) ───────────
 export const getNotificationPreferences  = () => api.get('/api/notifications/preferences');
 export const saveNotificationPreferences = (p) => api.put('/api/notifications/preferences', p);
 
-// ---------- Premium ----------
+// ─────────── Premium ───────────
 export const getPremiumStatus = () => api.get('/api/premium/status');
-export const redeemPremium = (payload) => api.post('/api/premium/redeem', payload);
+export const redeemPremium    = (payload) => api.post('/api/premium/redeem', payload);
 
-// ---------- SMS ----------
+// ─────────── SMS ───────────
 export const enableSms = (phone, enabled = true) =>
   api.post('/api/sms/enable', { phone, enabled });
 export const testSms = () => api.post('/api/sms/test');
 
-// ---------- Reviews ----------
+// ─────────── Reviews ───────────
 export const submitReview = (rating, text, name) =>
   api.post('/api/reviews', { rating, text, name });
 export const getTopReviews = () => api.get('/api/reviews/top');
 
-// ---------- Profile ----------
-export const getProfile = () => api.get('/api/profile');
+// ─────────── Profile ───────────
+export const getProfile    = () => api.get('/api/profile');
 export const updateProfile = (payload) => api.put('/api/profile', payload);
 
-// ---------- AI Premium features ----------
-export const aiSummary    = (text) => api.post('/api/ai/summary', { text });
-export const aiFlashcards = (text) => api.post('/api/ai/flashcards', { text });
-export const aiQuiz       = (text) => api.post('/api/ai/quiz', { text });
-export const aiConcepts   = (titles) => api.post('/api/ai/concepts', { titles });
-export const aiStreakCoach = (payload) => api.post('/api/ai/streak-coach', payload);
+// ─────────── AI (Premium) ───────────
+export const aiSummary     = (text)   => api.post('/api/ai/summary',     { text });
+export const aiFlashcards  = (text)   => api.post('/api/ai/flashcards',  { text });
+export const aiQuiz        = (text)   => api.post('/api/ai/quiz',        { text });
+export const aiConcepts    = (titles) => api.post('/api/ai/concepts',    { titles });
+export const aiStreakCoach = (payload)=> api.post('/api/ai/streak-coach', payload);
+// NEW (Premium): auto-process an uploaded learning_id (mindmap / markdown / flashcards)
+export const aiAutoProcess = (learning_id) =>
+  api.post('/api/ai/auto-process', { learning_id });
 
 export default api;

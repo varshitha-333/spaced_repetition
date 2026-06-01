@@ -4,7 +4,12 @@ import Navbar from '../components/Navbar';
 
 export default function History() {
   const [items, setItems] = useState([]);
-  useEffect(() => { getCompletedRevisions().then(r => setItems(r.data?.revisions || [])).catch(() => {}); }, []);
+  useEffect(() => {
+    getCompletedRevisions().then(r => {
+      const arr = Array.isArray(r.data) ? r.data : (r.data?.revisions || []);
+      setItems(arr);
+    }).catch(() => {});
+  }, []);
   return (
     <div className="min-h-screen">
       <Navbar />
@@ -22,10 +27,10 @@ export default function History() {
             {items.map(r => (
               <div key={r.id} className="card p-4">
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="pill-sage">✓ Day {r.day_number}</span>
-                  {r.completed_at && (
+                  <span className="pill-sage">✓ Day {r.stage || r.day_number}</span>
+                  {(r.completed_date || r.completed_at) && (
                     <span className="text-xs text-ink-muted">
-                      {new Date(r.completed_at).toLocaleDateString()}
+                      {new Date(r.completed_date || r.completed_at).toLocaleDateString()}
                     </span>
                   )}
                 </div>

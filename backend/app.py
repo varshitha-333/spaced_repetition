@@ -193,9 +193,85 @@ def api_health():
         "auth_method": "JWT",
     })
 
+# ═══════════════════════════════════════════════════════
+#  PRIVACY POLICY + TERMS  (Public, no-login pages — required for Google OAuth verification.
+#  These are served by Flask so even a backend-only domain has them. The React frontend
+#  ALSO has /privacy + /terms, which is what you should submit to Google for verification
+#  once you own your domain.)
+# ═══════════════════════════════════════════════════════
+PRIVACY_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>LearnFlow · Privacy Policy</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;color:#1a1a2e;line-height:1.65}
+h1{font-size:2rem}h2{margin-top:2rem}code{background:#f0f0ff;padding:2px 6px;border-radius:4px}
+a{color:#4f46e5}</style></head><body>
+<h1>LearnFlow — Privacy Policy</h1>
+<p><strong>Last updated:</strong> June 2026</p>
+<p>LearnFlow ("we", "us") is a spaced-repetition study app for students. This policy explains what data we collect, why, and how you can control it.</p>
+<h2>1. What we collect</h2>
+<ul>
+<li><strong>Account info</strong>: username, email, password hash. Created when you register.</li>
+<li><strong>Learning content</strong>: titles, descriptions, PDFs/text you upload — stored encrypted in Supabase Storage.</li>
+<li><strong>Optional Google Drive</strong>: with your explicit consent we sync your uploads to a folder called "Learning Intake" in <em>your own</em> Drive. We request the <code>drive.file</code> scope, which limits us to files we create — we cannot read your existing Drive.</li>
+<li><strong>Optional phone number</strong>: only if you enable SMS reminders. Used to send 8 AM + 9 PM nudges via Twilio.</li>
+</ul>
+<h2>2. Why we ask for Google access</h2>
+<p>We request the following Google OAuth scopes:</p>
+<ul>
+<li><code>openid</code>, <code>userinfo.email</code>, <code>userinfo.profile</code> — to let you sign in with Google.</li>
+<li><code>drive.file</code> — so we can upload <em>your</em> learning files into a folder in <em>your</em> Drive. We never access files we didn\'t create.</li>
+<li><code>spreadsheets</code> — to write a log of your learnings into a single LearnFlow spreadsheet in your Drive.</li>
+</ul>
+<p>We do <strong>not</strong> share Google data with any third party except as needed to provide the feature (i.e., Google APIs themselves).</p>
+<h2>3. How we use your data</h2>
+<ul>
+<li>To schedule your revisions on the 1·3·6·29·179 day intervals.</li>
+<li>To send you SMS reminders (only if you enable it).</li>
+<li>To call Google Gemini for AI summaries / flashcards / quizzes when you press those buttons (Premium feature).</li>
+</ul>
+<h2>4. Data deletion</h2>
+<p>Email <a href="mailto:learnflow.app@gmail.com">learnflow.app@gmail.com</a> and we delete your account, files, and Drive credentials within 7 days. You can also disconnect Drive any time from <em>Profile → Google Drive → Disconnect</em>.</p>
+<h2>5. Security</h2>
+<p>Passwords are bcrypt-hashed. Auth uses JWT (HS256) with a 30-day expiry. Drive credentials are stored encrypted in our database (Supabase row-level security).</p>
+<h2>6. Contact</h2>
+<p>Questions: <a href="mailto:learnflow.app@gmail.com">learnflow.app@gmail.com</a></p>
+<p><a href="/">← Back to LearnFlow</a> · <a href="/terms">Terms of Service</a></p>
+</body></html>"""
+
+TERMS_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>LearnFlow · Terms of Service</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;color:#1a1a2e;line-height:1.65}
+h1{font-size:2rem}h2{margin-top:2rem}a{color:#4f46e5}</style></head><body>
+<h1>LearnFlow — Terms of Service</h1>
+<p><strong>Last updated:</strong> June 2026</p>
+<p>By using LearnFlow you agree to these terms.</p>
+<h2>1. The service</h2>
+<p>LearnFlow helps students remember what they study using spaced repetition. We offer a Free plan, a Core plan, and a Premium plan (currently free for 30 days via the launch coupons LAUNCH30 / STUDENT30 / FIRST100 / LEARNFREE).</p>
+<h2>2. Your responsibilities</h2>
+<ul><li>Don\'t upload illegal, copyrighted (without permission), or harmful content.</li>
+<li>Don\'t share your account.</li>
+<li>Don\'t abuse the AI features (rate limits apply).</li></ul>
+<h2>3. Payments</h2>
+<p>The current checkout is a demo / launch promotion — no real payment is taken when a launch coupon is applied. Premium activates for 30 days from coupon redemption.</p>
+<h2>4. Cancellation</h2>
+<p>You can stop using LearnFlow any time. Email us to delete your data.</p>
+<h2>5. Liability</h2>
+<p>LearnFlow is provided "as is" without warranty. We are not liable for grades, exam outcomes, or memory failures.</p>
+<p><a href="/">← Back to LearnFlow</a> · <a href="/privacy">Privacy Policy</a></p>
+</body></html>"""
+
 @app.route("/privacy")
 def privacy():
-    return jsonify({"privacy": "Privacy Policy"})
+    # Serves a real HTML privacy policy (no JSON, no login required) — required
+    # for Google OAuth homepage / consent-screen verification.
+    from flask import Response
+    return Response(PRIVACY_HTML, mimetype="text/html")
+
+@app.route("/terms")
+def terms():
+    from flask import Response
+    return Response(TERMS_HTML, mimetype="text/html")
 
 
 # ─── BUCKET SETUP ───
@@ -951,6 +1027,30 @@ def api_logout():
     return jsonify({"message": "Logged out"})
 
 
+def _fetch_premium_state(user_id):
+    """Read premium_expires_at from user_state and return {is_premium, days_left, expires_at}.
+    Safe to call even if the column doesn't exist yet — returns is_premium=False."""
+    if not supabase:
+        return {"is_premium": False, "days_left": 0, "expires_at": None}
+    try:
+        r = supabase.table('user_state').select('premium_expires_at').eq('user_id', user_id).execute()
+        if not r.data:
+            return {"is_premium": False, "days_left": 0, "expires_at": None}
+        exp = r.data[0].get('premium_expires_at')
+        if not exp:
+            return {"is_premium": False, "days_left": 0, "expires_at": None}
+        from datetime import timezone as _tz
+        exp_dt = datetime.fromisoformat(exp.replace('Z', '+00:00'))
+        now = datetime.now(_tz.utc)
+        if exp_dt <= now:
+            return {"is_premium": False, "days_left": 0, "expires_at": exp}
+        days_left = max(0, (exp_dt - now).days + 1)
+        return {"is_premium": True, "days_left": days_left, "expires_at": exp}
+    except Exception as e:
+        logger.warning(f"_fetch_premium_state failed: {e}")
+        return {"is_premium": False, "days_left": 0, "expires_at": None}
+
+
 @app.route("/api/auth/me")
 def api_me():
     auth_header = request.headers.get("Authorization", "")
@@ -966,7 +1066,10 @@ def api_me():
         if state.get('drive_connected'):
             cj = get_drive_credentials(user_id)
             dc = cj is not None
-        logger.info(f"[ME OK] user_id={user_id}")
+        # FIX: include premium info on /me so the React useAuth hook reflects
+        # premium status immediately after redemption (no more "claim again" loop)
+        premium_info = _fetch_premium_state(user_id)
+        logger.info(f"[ME OK] user_id={user_id} premium={premium_info['is_premium']}")
         return jsonify({
             "user": {
                 "id": user_id,
@@ -978,6 +1081,8 @@ def api_me():
                 "notification_timezone": state.get('notification_timezone') or "UTC",
                 "notification_hour": state.get('notification_hour', DEFAULT_NOTIFICATION_HOUR),
                 "twilio_configured": is_twilio_configured(),
+                "is_premium": premium_info["is_premium"],
+                "premium": premium_info,
             }
         })
     except pyjwt.ExpiredSignatureError:
@@ -1392,11 +1497,13 @@ def api_save():
 @app.route("/api/revisions/today")
 @login_required
 def api_today():
+    # FIX: frontend reads `r.data?.revisions` everywhere. The old endpoint returned
+    # a bare array, which silently became `undefined` on the client → empty dashboard.
     uid = request.user_id
     today = date.today().isoformat()
     cleanup_old_files(uid)
     r = supabase.table('revisions').select('*').eq('user_id', uid).eq('scheduled_date', today).eq('completed', False).order('stage').execute()
-    return jsonify([_build_revision(row) for row in r.data])
+    return jsonify({"revisions": [_build_revision(row) for row in r.data]})
 
 @app.route("/api/revisions/overdue")
 @login_required
@@ -1404,15 +1511,16 @@ def api_overdue():
     uid = request.user_id
     today = date.today().isoformat()
     r = supabase.table('revisions').select('*').eq('user_id', uid).lt('scheduled_date', today).eq('completed', False).order('scheduled_date').execute()
-    return jsonify([_build_revision(row) for row in r.data])
+    return jsonify({"revisions": [_build_revision(row) for row in r.data]})
 
 @app.route("/api/revisions/completed")
 @login_required
 def api_completed():
+    # FIX: History page expects { revisions: [...] }; also include all-time completed,
+    # not only those completed today (the old query was useless for a History page).
     uid = request.user_id
-    today = date.today().isoformat()
-    r = supabase.table('revisions').select('*').eq('user_id', uid).eq('completed_date', today).eq('completed', True).execute()
-    return jsonify([_build_revision(row) for row in r.data])
+    r = supabase.table('revisions').select('*').eq('user_id', uid).eq('completed', True).order('completed_date', desc=True).limit(200).execute()
+    return jsonify({"revisions": [_build_revision(row) for row in r.data]})
 
 @app.route("/api/revisions/upcoming")
 @login_required
@@ -1425,15 +1533,25 @@ def api_upcoming():
     for rev in revisions:
         d = rev['scheduled_date']
         grouped.setdefault(d, []).append(rev)
-    return jsonify({"grouped": grouped, "total": len(revisions)})
+    # FIX: also return the flat array under `revisions` so the frontend can use either shape.
+    return jsonify({"revisions": revisions, "grouped": grouped, "total": len(revisions)})
 
 @app.route("/api/revisions/stats")
 @login_required
 def api_stats():
+    # FIX: Dashboard reads stats.current_streak and stats.total_learnings, but the
+    # old endpoint only returned `streak`. Now we return BOTH naming styles plus
+    # total_learnings so the dashboard cards don't show 0 / undefined.
     uid = request.user_id
     stats = get_revision_stats(uid)
     streak, _ = get_user_streak(uid)
     stats['streak'] = streak
+    stats['current_streak'] = streak                       # alias for the React Dashboard
+    try:
+        total_learnings = len(supabase.table('learnings').select('id').eq('user_id', uid).execute().data or [])
+    except Exception:
+        total_learnings = 0
+    stats['total_learnings'] = total_learnings
     stats['due_logic'] = get_due_logic_summary()
     return jsonify(stats)
 
@@ -1484,9 +1602,15 @@ def api_skip(revision_id):
 @app.route("/api/learnings")
 @login_required
 def api_learnings():
+    # FIX: PremiumLab.jsx reads r.data?.learnings — wrap accordingly.
     uid = request.user_id
     r = supabase.table('learnings').select('*').eq('user_id', uid).order('created_at', desc=True).limit(50).execute()
-    return jsonify(r.data)
+    rows = r.data or []
+    # Add `heading` alias so the React code that reads `l.heading || l.title` always finds something.
+    for row in rows:
+        if 'heading' not in row:
+            row['heading'] = row.get('title')
+    return jsonify({"learnings": rows})
 
 
 # ─── DOWNLOAD ───

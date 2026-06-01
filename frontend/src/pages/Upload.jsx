@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { motion } from 'framer-motion';
-import { uploadPreview, uploadSave } from '../services/api';
+import { uploadPreview, uploadSave, aiAutoProcess, getPremiumStatus } from '../services/api';
 import Navbar from '../components/Navbar';
 
 export default function Upload() {
@@ -13,6 +13,11 @@ export default function Upload() {
   const [text, setText] = useState('');
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [premium, setPremium] = useState(null);
+
+  useEffect(() => {
+    getPremiumStatus().then(r => setPremium(r.data)).catch(() => {});
+  }, []);
 
   const runPreview = async () => {
     const fd = new FormData();
@@ -24,19 +29,36 @@ export default function Upload() {
     try {
       const r = await uploadPreview(fd);
       setPreview(r.data);
-    } catch (e) { toast.error('Preview failed'); }
-    finally { setBusy(false); }
+    } catch (e) {
+      // Show the real error so we don't bury the upload bug ever again.
+      const msg = e.response?.data?.error || e.message || 'Preview failed';
+      toast.error(msg);
+    } finally { setBusy(false); }
   };
 
   const save = async () => {
     if (!preview) return;
     setBusy(true);
     try {
-      await uploadSave(preview);
+      const r = await uploadSave(preview);
+      const learning_id = r.data?.learning_id;
       toast.success('Saved — revisions scheduled 🎯');
+
+      // NEW: if user is Premium, kick off the AI auto-process (markdown +
+      // mindmap + summary + flashcards) in the background. The result is
+      // saved on the learning row and surfaced inside AI Lab automatically.
+      if (premium?.is_premium && learning_id) {
+        toast('✨ Running AI auto-process in the background…', { duration: 3500 });
+        aiAutoProcess(learning_id)
+          .then(() => toast.success('AI Lab assets ready for this upload'))
+          .catch(() => {/* silent — user can still trigger it from AI Lab */});
+      }
+
       nav('/dashboard');
-    } catch { toast.error('Save failed'); }
-    finally { setBusy(false); }
+    } catch (e) {
+      const msg = e.response?.data?.error || 'Save failed';
+      toast.error(msg);
+    } finally { setBusy(false); }
   };
 
   return (
@@ -46,6 +68,14 @@ export default function Upload() {
         <motion.h1 initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
           className="font-display text-3xl font-bold mb-2">Add a new resource</motion.h1>
         <p className="text-ink-muted mb-6">Drop in anything. AI titles + descriptions it for you.</p>
+
+        {premium?.is_premium && (
+          <div className="card-quiet p-3 mb-4 text-sm border border-peach-200 bg-peach-50/50">
+            ✨ <b>Premium auto-process is ON.</b> After you save, we'll automatically
+            generate a Markdown version, a mind-map, a 5-bullet summary, and 6
+            flashcards — ready in your AI Lab and on your next revision day.
+          </div>
+        )}
 
         <div className="card-quiet inline-flex p-1 mb-5">
           {[

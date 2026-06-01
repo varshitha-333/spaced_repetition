@@ -14,6 +14,8 @@ import Pricing from './pages/Pricing';
 import Payment from './pages/Payment';
 import Profile from './pages/Profile';
 import PremiumLab from './pages/PremiumLab';
+import Privacy from './pages/Privacy';        // NEW \u2014 needed for Google OAuth verification
+import Terms from './pages/Terms';            // NEW \u2014 needed for Google OAuth verification
 import LoadingScreen from './components/LoadingScreen';
 
 function Private({ children }) {
@@ -43,6 +45,10 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Landing />} />
           <Route path="/pricing" element={<Pricing />} />
+          {/* PUBLIC pages required for Google OAuth verification */}
+          <Route path="/privacy" element={<Privacy />} />
+          <Route path="/terms"   element={<Terms />} />
+
           <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
           <Route path="/register" element={<PublicOnly><Register /></PublicOnly>} />
 
