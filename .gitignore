@@ -36,4 +36,5 @@ logs/
 *.bak
 /tmp/
 AUDIT_FIXES_SUMMARY.md
-
+backend\TESTING_GUIDE.md
+PHASE_2_FIXES_SUMMARY.md

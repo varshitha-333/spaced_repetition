@@ -158,6 +158,40 @@ limiter.init_app(app)
 # ProxyFix so request.is_secure is correct behind Render's load balancer
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
+# ─── SECURITY HEADERS ───
+@app.after_request
+def add_security_headers(response):
+    """Add security headers to all responses."""
+    # Content Security Policy (relaxed for development, tighten in production)
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "font-src 'self' data:; "
+        "connect-src 'self' https://*.googleapis.com https://*.supabase.co; "
+        "frame-ancestors 'none';"
+    )
+    response.headers['Content-Security-Policy'] = csp
+    
+    # Prevent clickjacking
+    response.headers['X-Frame-Options'] = 'DENY'
+    
+    # Prevent MIME type sniffing
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    
+    # Enable XSS protection
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    
+    # Referrer policy
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    
+    # HSTS (only if HTTPS is available)
+    if request.is_secure:
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    
+    return response
+
 # Sessions are only used now for transient OAuth state (Google login + Drive connect).
 # All protected-route auth is handled via JWT in the Authorization header.
 app.config.update(
@@ -539,6 +573,29 @@ def validate_phone_number(phone):
     if not re.match(pattern, cleaned):
         return False, "Invalid phone number format. Use international format: +1234567890"
     return True, None
+
+def validate_learning_id(learning_id):
+    """Validate learning ID is a positive integer."""
+    try:
+        lid = int(learning_id)
+        if lid <= 0:
+            return False, "Learning ID must be a positive integer"
+        return True, None
+    except (ValueError, TypeError):
+        return False, "Invalid learning ID format"
+
+def validate_pagination_params(page, limit):
+    """Validate pagination parameters."""
+    try:
+        page = int(page) if page else 1
+        limit = int(limit) if limit else 20
+        if page < 1:
+            return False, "Page must be at least 1"
+        if limit < 1 or limit > 100:
+            return False, "Limit must be between 1 and 100"
+        return True, None
+    except (ValueError, TypeError):
+        return False, "Invalid pagination parameters"
 
 # ─── DATABASE HELPERS ───
 import time
@@ -989,34 +1046,193 @@ def _build_revision(row):
 # ─── GEMINI CLIENT ───
 class GeminiClient:
     def __init__(self):
-        self.model = "gemini-2.5-flash"
+        self.model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
         self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
         self.api_key = os.getenv("GEMINI_API_KEY")
         self.headers = {"Content-Type": "application/json"}
 
+    def _call_gemini(self, prompt, timeout=30):
+        """Helper method to call Gemini API with error handling and retry."""
+        if not self.api_key:
+            logger.error("GEMINI_API_KEY not configured")
+            return None
+        
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 2048
+            }
+        }
+        
+        for attempt in range(3):  # Retry up to 3 times
+            try:
+                r = requests.post(
+                    self.api_url, 
+                    headers=self.headers, 
+                    params={"key": self.api_key}, 
+                    json=payload, 
+                    timeout=timeout
+                )
+                r.raise_for_status()
+                return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            except requests.exceptions.Timeout:
+                logger.warning(f"Gemini API timeout (attempt {attempt + 1}/3)")
+                if attempt < 2:
+                    continue
+                return None
+            except requests.exceptions.HTTPError as e:
+                logger.error(f"Gemini API HTTP error: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Gemini API error: {e}")
+                return None
+        
+        return None
+
     def generate(self, snippet):
+        """Generate heading and description for learning material."""
         if not snippet or not snippet.strip():
             return "Untitled Item", "No content provided."
         if not self.api_key:
             return "Generated Title", "AI generation not configured."
-        payload = {
-            "contents": [{"parts": [{"text": (
-                "Generate concise learning metadata.\n\n"
-                "Rules:\n- Heading: max 8 words\n- Description: 1-2 short sentences\n"
-                "- No markdown or labels\n\n"
-                f"Content:\n{snippet[:1500]}"
-            )}]}]
-        }
-        try:
-            r = requests.post(self.api_url, headers=self.headers, params={"key": self.api_key}, json=payload, timeout=30)
-            r.raise_for_status()
-            text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            lines = [l.strip() for l in text.splitlines() if l.strip()]
-            heading = lines[0] if lines else "Untitled"
-            desc = " ".join(lines[1:]) if len(lines) > 1 else "Brief summary."
-            return heading, desc
-        except:
+        
+        prompt = (
+            "Generate concise learning metadata.\n\n"
+            "Rules:\n- Heading: max 8 words\n- Description: 1-2 short sentences\n"
+            "- No markdown or labels\n\n"
+            f"Content:\n{snippet[:1500]}"
+        )
+        
+        text = self._call_gemini(prompt)
+        if not text:
             return "Generated Heading", "Auto-description failed."
+        
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        heading = lines[0] if lines else "Untitled"
+        desc = " ".join(lines[1:]) if len(lines) > 1 else "Brief summary."
+        return heading, desc
+
+    def generate_summary(self, content):
+        """Generate a comprehensive summary of the content."""
+        if not self.api_key:
+            return None
+        
+        prompt = (
+            "Generate a comprehensive summary of the following content.\n\n"
+            "Rules:\n"
+            "- 3-5 bullet points\n"
+            "- Each bullet point should be 1-2 sentences\n"
+            "- Focus on key concepts and main ideas\n"
+            "- Use plain text, no markdown\n\n"
+            f"Content:\n{content[:3000]}"
+        )
+        
+        return self._call_gemini(prompt, timeout=45)
+
+    def generate_keywords(self, content):
+        """Generate key terms and concepts from the content."""
+        if not self.api_key:
+            return None
+        
+        prompt = (
+            "Extract 5-10 key terms and concepts from the following content.\n\n"
+            "Rules:\n"
+            "- Return as a comma-separated list\n"
+            "- Focus on important terminology\n"
+            "- No explanations, just the terms\n\n"
+            f"Content:\n{content[:3000]}"
+        )
+        
+        return self._call_gemini(prompt, timeout=30)
+
+    def generate_quiz(self, content):
+        """Generate a quiz based on the content."""
+        if not self.api_key:
+            return None
+        
+        prompt = (
+            "Generate a quiz with 5 multiple-choice questions based on the following content.\n\n"
+            "Rules:\n"
+            "- Format: Question | Option A | Option B | Option C | Option D | Correct Answer\n"
+            "- Each question on a new line\n"
+            "- Test understanding of key concepts\n"
+            "- Correct answer should be A, B, C, or D\n\n"
+            f"Content:\n{content[:3000]}"
+        )
+        
+        return self._call_gemini(prompt, timeout=45)
+
+    def generate_flashcards(self, content):
+        """Generate flashcards from the content."""
+        if not self.api_key:
+            return None
+        
+        prompt = (
+            "Generate 8-10 flashcards from the following content.\n\n"
+            "Rules:\n"
+            "- Format: Front | Back\n"
+            "- Each flashcard on a new line\n"
+            "- Front: question or term\n"
+            "- Back: answer or definition\n"
+            "- Focus on key facts and concepts\n\n"
+            f"Content:\n{content[:3000]}"
+        )
+        
+        return self._call_gemini(prompt, timeout=45)
+
+    def generate_mindmap(self, content):
+        """Generate a mindmap structure from the content."""
+        if not self.api_key:
+            return None
+        
+        prompt = (
+            "Generate a mindmap structure from the following content.\n\n"
+            "Rules:\n"
+            "- Format: Main Topic -> Subtopic 1, Subtopic 2 -> Detail 1, Detail 2\n"
+            "- Use arrows (->) to show hierarchy\n"
+            "- Use commas to separate items at the same level\n"
+            "- 3-4 levels deep maximum\n"
+            "- Focus on main topics and key relationships\n\n"
+            f"Content:\n{content[:3000]}"
+        )
+        
+        return self._call_gemini(prompt, timeout=45)
+
+    def generate_revision_notes(self, content):
+        """Generate structured revision notes from the content."""
+        if not self.api_key:
+            return None
+        
+        prompt = (
+            "Generate structured revision notes from the following content.\n\n"
+            "Rules:\n"
+            "- Format: ## Topic\n- Key point 1\n- Key point 2\n\n"
+            "- Use markdown headings for main topics\n"
+            "- Use bullet points for key information\n"
+            "- Include examples where relevant\n"
+            "- Focus on exam-relevant information\n\n"
+            f"Content:\n{content[:3000]}"
+        )
+        
+        return self._call_gemini(prompt, timeout=60)
+
+    def generate_all_outputs(self, content):
+        """Generate all AI outputs at once."""
+        if not self.api_key:
+            return None
+        
+        outputs = {
+            "summary": self.generate_summary(content),
+            "keywords": self.generate_keywords(content),
+            "quiz": self.generate_quiz(content),
+            "flashcards": self.generate_flashcards(content),
+            "mindmap": self.generate_mindmap(content),
+            "revision_notes": self.generate_revision_notes(content)
+        }
+        
+        # Filter out None values
+        return {k: v for k, v in outputs.items() if v is not None}
 
 gemini = GeminiClient()
 
@@ -1091,6 +1307,33 @@ def verify_drive_permissions(service):
     except Exception as e:
         logger.error(f"Drive permissions verification failed: {e}")
         return False, str(e)
+
+def verify_drive_connection(user_id):
+    """
+    Verify Drive connection is actually working by testing credentials and API access.
+    Returns (is_connected, status_message)
+    """
+    state = get_user_state(user_id)
+    if not state or not state.get('drive_connected'):
+        return False, "not_connected"
+    
+    cj = get_drive_credentials(user_id)
+    if not cj:
+        return False, "credentials_missing"
+    
+    try:
+        service = get_drive_service(user_id)
+        if not service:
+            return False, "service_failed"
+        
+        verified, msg = verify_drive_permissions(service)
+        if not verified:
+            return False, f"permissions_failed: {msg}"
+        
+        return True, "connected"
+    except Exception as e:
+        logger.error(f"Drive connection verification failed for user {user_id}: {e}")
+        return False, f"error: {str(e)}"
 
 def get_drive_service(user_id):
     """Get Drive service with credential refresh support."""
@@ -1375,20 +1618,20 @@ def api_me():
         user_id = data["user_id"]
         username = data.get("username", "")
         state = get_user_state(user_id) or {}
-        dc = False
-        if state.get('drive_connected'):
-            cj = get_drive_credentials(user_id)
-            dc = cj is not None
+        
+        # Verify Drive connection with actual API test
+        dc, drive_status_msg = verify_drive_connection(user_id)
+        
         # FIX: include premium info on /me so the React useAuth hook reflects
         # premium status immediately after redemption (no more "claim again" loop)
         premium_info = _fetch_premium_state(user_id)
-        logger.info(f"[ME OK] user_id={user_id} premium={premium_info['is_premium']}")
+        logger.info(f"[ME OK] user_id={user_id} premium={premium_info['is_premium']} drive_connected={dc} drive_status={drive_status_msg}")
         return jsonify({
             "user": {
                 "id": user_id,
                 "username": username,
                 "drive_connected": dc,
-                "drive_status": "connected" if dc else "not_connected",
+                "drive_status": drive_status_msg,
                 "notification_phone": state.get('notification_phone'),
                 "sms_notifications_enabled": bool(state.get('sms_notifications_enabled')),
                 "notification_timezone": state.get('notification_timezone') or "UTC",
@@ -1470,15 +1713,21 @@ def api_notification_preferences():
 
 
 @app.route("/api/notifications/send-daily", methods=["POST"])
+@limiter.limit("10 per hour")
 def api_send_daily_notifications():
+    """Cron job endpoint for sending daily SMS reminders."""
     provided_secret = request.headers.get("X-Notification-Secret", "")
     if not DAILY_NOTIFICATION_SECRET or provided_secret != DAILY_NOTIFICATION_SECRET:
+        logger.warning("Unauthorized cron job attempt")
         return jsonify({"error": "Unauthorized"}), 403
     if not supabase:
+        logger.error("Database not configured for cron job")
         return jsonify({"error": "Database not configured"}), 503
     if not is_twilio_configured():
+        logger.warning("Twilio not configured for cron job")
         return jsonify({"error": "Twilio is not configured"}), 503
 
+    logger.info("Starting daily notification cron job")
     processed = []
     skipped = []
     states = supabase.table('user_state').select('*').execute().data or []
@@ -1498,7 +1747,8 @@ def api_send_daily_notifications():
         local_today = local_now.date()
         target_hour = int(state.get('notification_hour') or DEFAULT_NOTIFICATION_HOUR)
 
-        if local_now.hour != target_hour:
+        # Allow a 1-hour window for delivery to account for cron timing
+        if abs(local_now.hour - target_hour) > 1:
             skipped.append({"user_id": user_id, "reason": "outside_delivery_hour", "timezone": str(zone), "local_hour": local_now.hour})
             continue
 
@@ -1513,21 +1763,30 @@ def api_send_daily_notifications():
 
         streak, _ = get_user_streak(user_id)
         body = build_daily_sms(user.get('username', 'Learner'), local_today, today_rows, overdue_rows, streak)
-        try:
-            result = send_sms_message(state['notification_phone'], body)
-            update_user_state(user_id, last_sms_sent_date=local_today.isoformat())
-            processed.append({
-                "user_id": user_id,
-                "username": user.get('username'),
-                "phone_number": state['notification_phone'],
-                "twilio_sid": getattr(result, 'sid', None),
-                "due_today": len(today_rows),
-                "overdue": len(overdue_rows),
-            })
-        except Exception as exc:
-            logger.error(f"Daily SMS failed for {user_id}: {exc}")
-            skipped.append({"user_id": user_id, "reason": f"send_failed: {exc}"})
+        
+        # Retry SMS sending up to 2 times
+        sms_sent = False
+        for attempt in range(2):
+            try:
+                result = send_sms_message(state['notification_phone'], body)
+                update_user_state(user_id, last_sms_sent_date=local_today.isoformat())
+                processed.append({
+                    "user_id": user_id,
+                    "username": user.get('username'),
+                    "phone_number": state['notification_phone'],
+                    "twilio_sid": getattr(result, 'sid', None),
+                    "due_today": len(today_rows),
+                    "overdue": len(overdue_rows),
+                })
+                sms_sent = True
+                logger.info(f"Daily SMS sent to user {user_id} (attempt {attempt + 1})")
+                break
+            except Exception as exc:
+                logger.error(f"Daily SMS failed for {user_id} (attempt {attempt + 1}): {exc}")
+                if attempt == 1:  # Last attempt failed
+                    skipped.append({"user_id": user_id, "reason": f"send_failed: {exc}"})
 
+    logger.info(f"Cron job completed: sent={len(processed)}, skipped={len(skipped)}")
     return jsonify({
         "message": "Daily notification job completed",
         "sent": processed,
@@ -1586,6 +1845,12 @@ def api_google_callback():
     logger.info(f"[Google callback] state taken from URL param: {raw_state is not None}")
     try:
         flow_kwargs = {"state": final_state} if final_state else {}
+        # OAuth scopes for Google Sign-In
+        oauth_scopes = [
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile"
+        ]
         flow = Flow.from_client_config({
             "web": {
                 "client_id": GOOGLE_OAUTH_CLIENT_ID,
@@ -1594,14 +1859,26 @@ def api_google_callback():
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "redirect_uris": [GOOGLE_LOGIN_REDIRECT]
             }
-        }, scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"], **flow_kwargs)
+        }, scopes=oauth_scopes, **flow_kwargs)
         flow.redirect_uri = GOOGLE_LOGIN_REDIRECT
         flow.fetch_token(authorization_response=request.url)
         creds = flow.credentials
+        
+        # Log token details for debugging (without exposing secrets)
+        logger.info(f"[Google OAuth] Token received, has refresh token: {bool(creds.refresh_token)}")
+        logger.info(f"[Google OAuth] Token scopes: {creds.scopes}")
+        
+        # Verify we got the required scopes
+        required_scopes = {"openid", "https://www.googleapis.com/auth/userinfo.email"}
+        if not required_scopes.issubset(set(creds.scopes)):
+            logger.error(f"[Google OAuth] Missing required scopes. Got: {creds.scopes}")
+            return flask_redirect(f"{FRONTEND_URL}/login?error=google_scopes_missing")
+        
         info = requests.get('https://www.googleapis.com/oauth2/v3/userinfo',
                             headers={'Authorization': f'Bearer {creds.token}'}).json()
         email = info.get('email')
         if not email:
+            logger.error("[Google OAuth] No email in user info response")
             return flask_redirect(f"{FRONTEND_URL}/login?error=google_no_email")
 
         user = get_user_by_email(email)
@@ -1617,8 +1894,10 @@ def api_google_callback():
                 uname = email.split('@')[0] + '_' + uuid.uuid4().hex[:6]
                 uid, err = create_user(uname, generate_password_hash(uuid.uuid4().hex), email)
                 if not uid:
+                    logger.error(f"[Google register] Failed to create user for email={email}: {err}")
                     return flask_redirect(f"{FRONTEND_URL}/register?error=signup_failed")
                 user = get_user_by_email(email)
+                logger.info(f"[Google register OK] user_id={uid} email={email}")
 
         # ── Pass a JWT in the redirect URL instead of relying on cookies ──
         token = make_token(user['id'], user['username'])
@@ -1685,6 +1964,17 @@ def api_drive_callback():
         flow.redirect_uri = GOOGLE_DRIVE_REDIRECT
         flow.fetch_token(authorization_response=request.url)
         creds = flow.credentials
+        
+        # Verify we got refresh token (required for long-term access)
+        if not creds.refresh_token:
+            logger.warning(f"[Drive callback] No refresh token received for user {uid}. Access may expire.")
+        
+        # Verify Drive API scope is present
+        drive_scope = "https://www.googleapis.com/auth/drive.file"
+        if drive_scope not in creds.scopes:
+            logger.error(f"[Drive callback] Missing Drive scope. Got: {creds.scopes}")
+            return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=error&reason=missing_scope")
+        
         cd = {
             'token': creds.token,
             'refresh_token': creds.refresh_token,
@@ -1693,11 +1983,26 @@ def api_drive_callback():
             'client_secret': creds.client_secret,
             'scopes': list(creds.scopes) if creds.scopes else SCOPES
         }
-        save_drive_credentials(uid, json.dumps(cd))
-        logger.info(f"[Drive callback] Drive connected for user_id={uid}")
+        saved = save_drive_credentials(uid, json.dumps(cd))
+        if not saved:
+            logger.error(f"[Drive callback] Failed to save credentials for user {uid}")
+            return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=error&reason=save_failed")
+        
+        # Verify the connection works immediately
+        service = get_drive_service(uid)
+        if not service:
+            logger.error(f"[Drive callback] Failed to create Drive service for user {uid}")
+            return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=error&reason=service_failed")
+        
+        verified, msg = verify_drive_permissions(service)
+        if not verified:
+            logger.error(f"[Drive callback] Drive permissions verification failed: {msg}")
+            return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=error&reason=permissions_failed")
+        
+        logger.info(f"[Drive callback] Drive connected and verified for user_id={uid}")
         return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=connected")
     except Exception as e:
-        logger.error(f"Drive callback error: {e}")
+        logger.error(f"Drive callback error: {e}\n{traceback.format_exc()}")
         return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=error")
 
 @app.route("/api/drive/disconnect", methods=["POST"])
@@ -1835,6 +2140,119 @@ def api_save():
     except Exception as e:
         logger.error(f"Save error: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+# ─── AI ARTIFACTS ENDPOINTS ───
+@app.route("/api/ai/generate", methods=["POST"])
+@login_required
+@limiter.limit("10 per hour")
+def api_ai_generate():
+    """Generate AI artifacts for a learning item."""
+    uid = request.user_id
+    data = request.get_json(force=True, silent=True) or {}
+    learning_id = data.get("learning_id")
+    artifact_types = data.get("types", ["summary", "keywords", "quiz", "flashcards", "mindmap", "revision_notes"])
+    
+    # Validate learning_id
+    valid, error = validate_learning_id(learning_id)
+    if not valid:
+        return jsonify({"error": error}), 400
+    
+    # Check premium status
+    premium_info = _fetch_premium_state(uid)
+    if not premium_info["is_premium"]:
+        logger.warning(f"[AI GENERATE] Non-premium user {uid} attempted to generate artifacts")
+        return jsonify({"error": "Premium required for AI features"}), 402
+    
+    try:
+        # Get learning content
+        r = supabase.table('learnings').select('*').eq('id', learning_id).eq('user_id', uid).execute()
+        if not r.data:
+            logger.warning(f"[AI GENERATE] Learning {learning_id} not found for user {uid}")
+            return jsonify({"error": "Learning not found"}), 404
+        
+        learning = r.data[0]
+        content = (learning.get('content') or learning.get('title') or "")[:6000]
+        if not content.strip():
+            return jsonify({"error": "No content to process"}), 400
+        
+        # Validate artifact types
+        valid_types = {"summary", "keywords", "quiz", "flashcards", "mindmap", "revision_notes"}
+        invalid_types = [t for t in artifact_types if t not in valid_types]
+        if invalid_types:
+            return jsonify({"error": f"Invalid artifact types: {invalid_types}"}), 400
+        
+        # Generate requested artifacts
+        results = {}
+        for artifact_type in artifact_types:
+            if artifact_type == "summary":
+                results["summary"] = gemini.generate_summary(content)
+            elif artifact_type == "keywords":
+                results["keywords"] = gemini.generate_keywords(content)
+            elif artifact_type == "quiz":
+                results["quiz"] = gemini.generate_quiz(content)
+            elif artifact_type == "flashcards":
+                results["flashcards"] = gemini.generate_flashcards(content)
+            elif artifact_type == "mindmap":
+                results["mindmap"] = gemini.generate_mindmap(content)
+            elif artifact_type == "revision_notes":
+                results["revision_notes"] = gemini.generate_revision_notes(content)
+        
+        # Store artifacts in database
+        saved_count = 0
+        for artifact_type, artifact_content in results.items():
+            if artifact_content:
+                try:
+                    supabase.table('ai_artifacts').insert({
+                        'learning_id': learning_id,
+                        'artifact_type': artifact_type,
+                        'content': artifact_content
+                    }).execute()
+                    saved_count += 1
+                    logger.info(f"Saved AI artifact: {artifact_type} for learning_id={learning_id}")
+                except Exception as e:
+                    logger.error(f"Failed to save artifact {artifact_type}: {e}")
+        
+        logger.info(f"[AI GENERATE OK] user_id={uid} learning_id={learning_id} saved={saved_count}/{len(results)}")
+        return jsonify({
+            "message": "AI artifacts generated",
+            "learning_id": learning_id,
+            "artifacts": results,
+            "saved_count": saved_count
+        })
+    except Exception as e:
+        logger.error(f"AI generation error: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": f"AI generation failed: {str(e)}"}), 500
+
+
+@app.route("/api/ai/artifacts/<int:learning_id>", methods=["GET"])
+@login_required
+def api_get_ai_artifacts(learning_id):
+    """Get all AI artifacts for a learning item."""
+    uid = request.user_id
+    
+    try:
+        # Verify ownership
+        lr = supabase.table('learnings').select('id').eq('id', learning_id).eq('user_id', uid).execute()
+        if not lr.data:
+            logger.warning(f"[AI ARTIFACTS GET] Learning {learning_id} not found for user {uid}")
+            return jsonify({"error": "Learning not found"}), 404
+        
+        # Get artifacts
+        ar = supabase.table('ai_artifacts').select('*').eq('learning_id', learning_id).execute()
+        
+        artifacts = {}
+        for artifact in ar.data:
+            artifacts[artifact['artifact_type']] = artifact['content']
+        
+        logger.info(f"[AI ARTIFACTS GET OK] user_id={uid} learning_id={learning_id} count={len(artifacts)}")
+        return jsonify({
+            "learning_id": learning_id,
+            "artifacts": artifacts
+        })
+    except Exception as e:
+        logger.error(f"Get artifacts error: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": f"Failed to get artifacts: {str(e)}"}), 500
 
 
 # ─── REVISIONS ───

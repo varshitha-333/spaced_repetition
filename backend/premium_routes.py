@@ -181,20 +181,49 @@ def premium_status():
 def premium_redeem():
     """
     Body: { name, email, phone, coupon }
-    Validates coupon (case-insensitive). Stores dummy 'payment' record.
-    Sets premium_expires_at = now + 30 days. Returns receipt.
+    Validates coupon (case-insensitive). Checks if user already has premium.
+    Prevents duplicate redemptions. Sets premium_expires_at = now + 30 days.
+    Returns receipt.
     """
     u = request.current_user
     data = request.get_json(silent=True) or {}
     coupon_raw = (data.get("coupon") or "").strip().upper()
+    
+    # Validate coupon
     if coupon_raw not in VALID_COUPONS:
+        _logger.warning(f"[REDEEM] Invalid coupon attempt: {coupon_raw} by user {u['id']}")
         return jsonify({"error": "invalid_coupon", "valid": sorted(VALID_COUPONS)}), 400
 
+    # Validate required fields
     name = (data.get("name") or "").strip()[:80]
     email = (data.get("email") or "").strip()[:120]
     phone = (data.get("phone") or "").strip()[:20]
     if not name or not email:
         return jsonify({"error": "missing_fields"}), 400
+    
+    # Validate email format
+    if "@" not in email or "." not in email:
+        return jsonify({"error": "invalid_email"}), 400
+
+    # Check current premium status
+    current_status = _get_premium_state(u["id"])
+    if current_status["is_premium"]:
+        _logger.warning(f"[REDEEM] User {u['id']} already has premium until {current_status['expires_at']}")
+        return jsonify({
+            "error": "already_premium",
+            "expires_at": current_status["expires_at"],
+            "days_left": current_status["days_left"]
+        }), 400
+
+    # Check if coupon was already redeemed by this user
+    try:
+        r = _supabase.table("user_state").select("premium_coupon").eq("user_id", u["id"]).execute()
+        if r.data and r.data[0].get("premium_coupon"):
+            existing_coupon = r.data[0]["premium_coupon"]
+            _logger.warning(f"[REDEEM] User {u['id']} already redeemed coupon: {existing_coupon}")
+            return jsonify({"error": "coupon_already_redeemed", "coupon": existing_coupon}), 400
+    except Exception as e:
+        _logger.error(f"[REDEEM] Failed to check existing coupon: {e}")
 
     now = datetime.now(timezone.utc)
     expires = now + timedelta(days=PREMIUM_DAYS)
@@ -207,6 +236,7 @@ def premium_redeem():
             "premium_billing_name": name,
             "premium_billing_email": email,
         }).eq("user_id", u["id"]).execute()
+        _logger.info(f"[REDEEM OK] User {u['id']} redeemed coupon {coupon_raw}, expires {expires}")
     except Exception as e:
         _logger.error(f"[REDEEM] update failed: {e}")
         return jsonify({"error": "db_error"}), 500
