@@ -5,7 +5,7 @@ Drop-in Flask Blueprint that adds:
   • 30-day Premium coupon flow (LAUNCH30, STUDENT30, FIRST100, LEARNFREE)
   • Premium status check
   • Twilio SMS toggle (real if env vars present, else mock-logs)
-  • Reviews submission + Gemini-scored Top-5 reviews
+  • Reviews submission + AI-scored Top-5 reviews
   • Premium AI features (Smart Summary, Flashcards, Quiz Me, Concept Linker, Streak Coach)
 
 How to register in app.py
@@ -42,23 +42,31 @@ _decode_token = None
 # ---------------------------------------------------------------------------
 VALID_COUPONS = {"LAUNCH30", "STUDENT30", "FIRST100", "LEARNFREE"}
 PREMIUM_DAYS = 30
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-GEMINI_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-)
 
 TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_FROM = os.getenv("TWILIO_FROM_NUMBER", "")
 
+# AI Service (will be initialized)
+_ai_generator = None
+
 
 def init_premium(app, supabase_client, logger, decode_token_fn):
     """Wire shared dependencies from app.py into this blueprint."""
-    global _supabase, _logger, _decode_token
+    global _supabase, _logger, _decode_token, _ai_generator
     _supabase = supabase_client
     _logger = logger
     _decode_token = decode_token_fn
+    
+    # Initialize AI generator
+    try:
+        from ai_generator import get_ai_generator
+        _ai_generator = get_ai_generator()
+        _logger.info("[PREMIUM] AI generator initialized.")
+    except Exception as e:
+        _logger.warning(f"[PREMIUM] AI generator initialization failed: {e}")
+        _ai_generator = None
+    
     _logger.info("[PREMIUM] Blueprint initialized.")
 
 
@@ -109,36 +117,24 @@ def _get_premium_state(user_id: str) -> dict:
         return {"is_premium": False, "expires_at": None, "days_left": 0}
 
 
-def _gemini_generate(prompt: str, system: str | None = None) -> str:
-    """Call Gemini. Returns text content, or empty string on failure."""
-    if not GEMINI_API_KEY:
-        _logger.info("[GEMINI] no API key — returning stub response")
+def _ai_generate(prompt: str, system: str | None = None) -> str:
+    """Call unified AI service with automatic fallback. Returns text content, or empty string on failure."""
+    if not _ai_generator:
+        _logger.warning("[AI] AI generator not initialized — returning stub response")
         return ""
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 1024},
-    }
-    if system:
-        body["systemInstruction"] = {"parts": [{"text": system}]}
+    
     try:
-        resp = requests.post(
-            GEMINI_URL,
-            params={"key": GEMINI_API_KEY},
-            json=body,
-            timeout=25,
-        )
-        if resp.status_code != 200:
-            _logger.warning(f"[GEMINI] {resp.status_code}: {resp.text[:200]}")
+        # Use the unified AI service
+        full_prompt = f"{system}\n\n{prompt}" if system else prompt
+        result = _ai_generator.ai_service.generate(full_prompt, use_cache=True)
+        
+        if result.get('success'):
+            return result['content']
+        else:
+            _logger.warning(f"[AI] Generation failed: {result.get('error')}")
             return ""
-        data = resp.json()
-        return (
-            data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-        )
     except Exception as e:
-        _logger.warning(f"[GEMINI] error: {e}")
+        _logger.warning(f"[AI] Error: {e}")
         return ""
 
 
@@ -378,8 +374,8 @@ def reviews_submit():
     if len(text) < 10:
         return jsonify({"error": "review_too_short"}), 400
 
-    # Ask Gemini to score the review's quality (clarity + sentiment + specificity)
-    score_text = _gemini_generate(
+    # Ask AI to score the review's quality (clarity + sentiment + specificity)
+    score_text = _ai_generate(
         f"Rate this product review on a 0-10 scale for: clarity, helpfulness, "
         f"and specificity. Return ONLY the number, nothing else.\n\nReview: {text}",
         system="You are a strict review-quality grader. Output a single integer 0-10.",
@@ -408,7 +404,7 @@ def reviews_submit():
 
 @premium_bp.route("/api/reviews/top")
 def reviews_top():
-    """Public — top 5 reviews ranked by Gemini quality_score then rating."""
+    """Public — top 5 reviews ranked by AI quality_score then rating."""
     try:
         r = _supabase.table("reviews").select(
             "name,rating,text,quality_score,created_at"
@@ -504,12 +500,12 @@ def ai_summary():
     text = (request.get_json(silent=True) or {}).get("text", "")[:8000]
     if len(text) < 30:
         return jsonify({"error": "text_too_short"}), 400
-    out = _gemini_generate(
+    out = _ai_generate(
         f"Summarize the following study material in 5 bullet points a student can "
         f"actually remember. Each bullet ≤ 18 words. Plain text, no markdown.\n\n{text}",
         system="You are a study-buddy that produces tight, memorable summaries.",
     )
-    return jsonify({"summary": out or "• (Gemini key not set — set GEMINI_API_KEY to enable)"})
+    return jsonify({"summary": out or "• (AI provider not configured — set GEMINI_API_KEY, NVIDIA_API_KEY, or OPENROUTER_API_KEY to enable)"})
 
 
 @premium_bp.route("/api/ai/flashcards", methods=["POST"])
@@ -521,7 +517,7 @@ def ai_flashcards():
     text = (request.get_json(silent=True) or {}).get("text", "")[:8000]
     if len(text) < 30:
         return jsonify({"error": "text_too_short"}), 400
-    out = _gemini_generate(
+    out = _ai_generate(
         f"Create 6 flashcards from this material. Return STRICT JSON array of "
         f'objects: [{{"q":"...","a":"..."}}]. No commentary.\n\n{text}',
         system="You are a flashcard generator. Output strict JSON only.",
@@ -535,7 +531,7 @@ def ai_flashcards():
     except Exception:
         cards = []
     if not cards:
-        cards = [{"q": "Set GEMINI_API_KEY to generate real flashcards", "a": "👨‍💻"}]
+        cards = [{"q": "Configure AI provider to generate real flashcards", "a": "👨‍💻"}]
     return jsonify({"flashcards": cards[:6]})
 
 
@@ -548,7 +544,7 @@ def ai_quiz():
     text = (request.get_json(silent=True) or {}).get("text", "")[:8000]
     if len(text) < 30:
         return jsonify({"error": "text_too_short"}), 400
-    out = _gemini_generate(
+    out = _ai_generate(
         f"Create 5 multiple-choice questions from this material. STRICT JSON: "
         f'[{{"q":"...","options":["A","B","C","D"],"answer_index":0,"why":"..."}}].\n\n{text}',
         system="You are a quiz generator. JSON only.",
@@ -581,7 +577,7 @@ def ai_concepts():
     titles = (request.get_json(silent=True) or {}).get("titles", [])[:80]
     if not titles:
         return jsonify({"clusters": []})
-    out = _gemini_generate(
+    out = _ai_generate(
         f"Group these study resource titles into 3-6 concept clusters. STRICT JSON: "
         f'[{{"concept":"...","items":["title1","title2"]}}].\n\nTitles:\n'
         + "\n".join(f"- {t}" for t in titles),
@@ -633,19 +629,19 @@ def ai_auto_process():
     if not base_text.strip():
         return jsonify({"error": "no_content"}), 400
 
-    markdown = _gemini_generate(
+    markdown = _ai_generate(
         f"Convert this study material into clean Markdown notes. Use ##, ###, "
         f"bullet points, and **bold** for key terms. No preamble.\n\n{base_text}",
         system="You are a study-note formatter. Output Markdown only.",
     ) or f"## {learning.get('title','Notes')}\n\n{base_text}"
 
-    summary = _gemini_generate(
+    summary = _ai_generate(
         f"Summarize in EXACTLY 5 short bullets a student can memorize. "
         f"Each bullet ≤ 18 words. Plain text.\n\n{base_text}",
         system="Tight study-buddy summaries.",
-    ) or "• Summary unavailable (set GEMINI_API_KEY)"
+    ) or "• Summary unavailable (configure AI provider)"
 
-    mindmap_text = _gemini_generate(
+    mindmap_text = _ai_generate(
         f'Build a mind-map of this material as STRICT JSON: '
         f'{{"root":"...","branches":[{{"label":"...","children":["...","..."]}}]}}. '
         f'3-5 top branches. No commentary.\n\n{base_text}',
@@ -657,7 +653,7 @@ def ai_auto_process():
     except Exception:
         mindmap = {"root": learning.get("title", "Notes"), "branches": []}
 
-    cards_text = _gemini_generate(
+    cards_text = _ai_generate(
         f'Make 6 flashcards as STRICT JSON: [{{"q":"...","a":"..."}}].\n\n{base_text}',
         system="Flashcard generator. JSON only.",
     )
@@ -692,7 +688,7 @@ def ai_streak_coach():
     streak = int(data.get("streak", 0))
     done = int(data.get("done_today", 0))
     due = int(data.get("due_today", 0))
-    out = _gemini_generate(
+    out = _ai_generate(
         f"Write ONE motivating sentence (≤ 22 words) for a student. "
         f"Streak: {streak} days. Completed today: {done}. Still due: {due}. "
         f"Be specific, warm, no emojis at start.",
