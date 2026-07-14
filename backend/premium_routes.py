@@ -121,6 +121,7 @@ def _ai_generate(prompt: str, system: str | None = None) -> str:
     """Call unified AI service with automatic fallback. Returns text content, or empty string on failure."""
     if not _ai_generator:
         _logger.warning("[AI] AI generator not initialized — returning stub response")
+        _logger.warning("[AI] Check if GEMINI_API_KEY, NVIDIA_API_KEY, or OPENROUTER_API_KEY are set in environment")
         return ""
     
     try:
@@ -132,9 +133,11 @@ def _ai_generate(prompt: str, system: str | None = None) -> str:
             return result['content']
         else:
             _logger.warning(f"[AI] Generation failed: {result.get('error')}")
+            _logger.warning(f"[AI] Provider status: {_ai_generator.get_service_status()}")
             return ""
     except Exception as e:
         _logger.warning(f"[AI] Error: {e}")
+        _logger.warning(f"[AI] Provider status: {_ai_generator.get_service_status()}")
         return ""
 
 

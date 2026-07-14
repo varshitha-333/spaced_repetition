@@ -34,11 +34,36 @@ export default function Profile() {
       let countryCode = '+91';
       let phoneOnly = data.phone || '';
       if (phoneOnly && phoneOnly.startsWith('+')) {
-        // Extract country code (first 1-4 digits after +)
-        const match = phoneOnly.match(/^\+(\d{1,4})(\d+)$/);
-        if (match) {
-          countryCode = '+' + match[1];
-          phoneOnly = match[2];
+        // Known country codes mapping (must match dropdown options exactly)
+        const countryCodes = [
+          '+971', '+353', '+65', '+64', '+46', '+47', '+45', '+31', '+39', '+34',
+          '+1', '+44', '+91', '+61', '+81', '+86', '+49', '+33', '+7', '+55', '+52', '+27'
+        ];
+        
+        // Sort by length (longest first) to match +971 before +1
+        countryCodes.sort((a, b) => b.length - a.length);
+        
+        // Try to match known country codes
+        let matched = false;
+        for (const code of countryCodes) {
+          if (phoneOnly.startsWith(code)) {
+            countryCode = code;
+            phoneOnly = phoneOnly.substring(code.length);
+            matched = true;
+            break;
+          }
+        }
+        
+        // If no known country code matched, use default extraction
+        if (!matched) {
+          const match = phoneOnly.match(/^\+(\d{1,4})(\d+)$/);
+          if (match) {
+            countryCode = '+' + match[1];
+            phoneOnly = match[2];
+          } else {
+            // If regex fails, just remove the + and use default country code
+            phoneOnly = phoneOnly.replace(/^\+/, '');
+          }
         }
       }
       setSms({
