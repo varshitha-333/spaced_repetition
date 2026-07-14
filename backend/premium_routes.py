@@ -45,7 +45,7 @@ PREMIUM_DAYS = 30
 
 TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_FROM = os.getenv("TWILIO_FROM_NUMBER", "")
+TWILIO_FROM = os.getenv("TWILIO_FROM_PHONE", "")
 
 # AI Service (will be initialized)
 _ai_generator = None
@@ -138,19 +138,34 @@ def _ai_generate(prompt: str, system: str | None = None) -> str:
         return ""
 
 
+def normalize_phone_number(phone: str) -> str:
+    """Normalize phone number to E.164 format."""
+    # Remove all non-numeric characters except +
+    phone = ''.join(c for c in phone if c.isdigit() or c == '+')
+    
+    # Ensure it starts with +
+    if not phone.startswith('+'):
+        phone = '+' + phone
+    
+    return phone
+
+
 def _send_sms_real_or_mock(to_phone: str, body: str) -> dict:
     """Try real Twilio if creds present, else mock-log."""
+    # Normalize phone number to E.164 format
+    normalized_phone = normalize_phone_number(to_phone)
+    
     if TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM:
         try:
             from twilio.rest import Client
             client = Client(TWILIO_SID, TWILIO_TOKEN)
-            msg = client.messages.create(body=body, from_=TWILIO_FROM, to=to_phone)
-            _logger.info(f"[SMS REAL] sid={msg.sid} to={to_phone}")
-            return {"mode": "real", "sid": msg.sid}
+            msg = client.messages.create(body=body, from_=TWILIO_FROM, to=normalized_phone)
+            _logger.info(f"[SMS REAL] sid={msg.sid} to={normalized_phone}")
+            return {"mode": "real", "sid": msg.sid, "to": normalized_phone}
         except Exception as e:
             _logger.warning(f"[SMS REAL FAIL] {e} — falling back to mock")
-    _logger.info(f"[SMS MOCK] to={to_phone} body={body!r}")
-    return {"mode": "mock", "to": to_phone, "body": body}
+    _logger.info(f"[SMS MOCK] to={normalized_phone} body={body!r}")
+    return {"mode": "mock", "to": normalized_phone, "body": body}
 
 
 # ---------------------------------------------------------------------------

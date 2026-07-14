@@ -1730,6 +1730,11 @@ def api_send_daily_notifications():
         logger.warning("Twilio not configured for cron job")
         return jsonify({"error": "Twilio is not configured"}), 503
 
+    # Check if test mode (skip time check)
+    test_mode = request.headers.get("X-Test-Mode", "").lower() == "true"
+    if test_mode:
+        logger.info("TEST MODE: Skipping time check")
+
     logger.info("Starting daily notification cron job")
     processed = []
     skipped = []
@@ -1751,7 +1756,8 @@ def api_send_daily_notifications():
         target_hour = int(state.get('notification_hour') or DEFAULT_NOTIFICATION_HOUR)
 
         # Allow a 1-hour window for delivery to account for cron timing
-        if abs(local_now.hour - target_hour) > 1:
+        # Skip time check if in test mode
+        if not test_mode and abs(local_now.hour - target_hour) > 1:
             skipped.append({"user_id": user_id, "reason": "outside_delivery_hour", "timezone": str(zone), "local_hour": local_now.hour})
             continue
 
@@ -1767,22 +1773,32 @@ def api_send_daily_notifications():
         streak, _ = get_user_streak(user_id)
         body = build_daily_sms(user.get('username', 'Learner'), local_today, today_rows, overdue_rows, streak)
         
+        # Normalize phone number to E.164 format
+        try:
+            normalized_phone = normalize_phone_number(state['notification_phone'])
+            logger.info(f"Normalized phone for user {user_id}: {state['notification_phone']} -> {normalized_phone}")
+        except Exception as e:
+            logger.error(f"Phone normalization failed for user {user_id}: {e}")
+            skipped.append({"user_id": user_id, "reason": f"invalid_phone_format: {e}"})
+            continue
+        
         # Retry SMS sending up to 2 times
         sms_sent = False
         for attempt in range(2):
             try:
-                result = send_sms_message(state['notification_phone'], body)
+                result = send_sms_message(normalized_phone, body)
                 update_user_state(user_id, last_sms_sent_date=local_today.isoformat())
                 processed.append({
                     "user_id": user_id,
                     "username": user.get('username'),
-                    "phone_number": state['notification_phone'],
+                    "phone_number": normalized_phone,
+                    "original_phone": state['notification_phone'],
                     "twilio_sid": getattr(result, 'sid', None),
                     "due_today": len(today_rows),
                     "overdue": len(overdue_rows),
                 })
                 sms_sent = True
-                logger.info(f"Daily SMS sent to user {user_id} (attempt {attempt + 1})")
+                logger.info(f"Daily SMS sent to user {user_id} (attempt {attempt + 1}), SID: {getattr(result, 'sid', None)}")
                 break
             except Exception as exc:
                 logger.error(f"Daily SMS failed for {user_id} (attempt {attempt + 1}): {exc}")
