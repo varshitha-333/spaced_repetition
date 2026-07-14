@@ -11,13 +11,20 @@ export default function TodayTasks() {
   const [items, setItems] = useState([]);
   const [idx, setIdx] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const load = useCallback(() => {
+    setLoading(true);
     getTodayRevisions().then(r => {
       // Accept both shapes — { revisions: [...] } (new) and bare array (legacy)
       const arr = Array.isArray(r.data) ? r.data : (r.data?.revisions || []);
-      setItems(arr);
+      // Limit to first 5 items
+      setItems(arr.slice(0, 5));
       setIdx(0);
+    }).catch(() => {
+      toast.error('Failed to load revisions');
+    }).finally(() => {
+      setLoading(false);
     });
   }, []);
   useEffect(load, [load]);
@@ -32,6 +39,17 @@ export default function TodayTasks() {
     catch { toast.error('Failed'); }
     finally { setBusy(false); }
   };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen">
+        <Navbar />
+        <div className="container-tight py-16 text-center">
+          <div className="card p-8 shimmer h-64" />
+        </div>
+      </div>
+    );
+  }
 
   if (!current) {
     return (
@@ -57,12 +75,29 @@ export default function TodayTasks() {
           <div className="pill-indigo mb-3">Day {current.stage || current.day_number || '?'}</div>
           <h2 className="font-display text-2xl font-bold mb-2">{current.heading || 'Untitled'}</h2>
           {current.description && <p className="text-ink-muted leading-relaxed">{current.description}</p>}
-          {current.url && (
-            <a href={current.url} target="_blank" rel="noreferrer"
-              className="inline-block mt-4 text-indigo-600 font-medium hover:underline">
-              Open source ↗
-            </a>
-          )}
+          
+          {/* Links */}
+          <div className="flex flex-wrap gap-3 mt-4">
+            {current.url && (
+              <a href={current.url} target="_blank" rel="noreferrer"
+                className="inline-block text-indigo-600 font-medium hover:underline text-sm">
+                Open source ↗
+              </a>
+            )}
+            {current.supabase_url && (
+              <a href={current.supabase_url} target="_blank" rel="noreferrer"
+                className="inline-block text-indigo-600 font-medium hover:underline text-sm">
+                Open file ↗
+              </a>
+            )}
+            {current.drive_link && (
+              <a href={current.drive_link} target="_blank" rel="noreferrer"
+                className="inline-block text-emerald-600 font-medium hover:underline text-sm">
+                Open Drive ↗
+              </a>
+            )}
+          </div>
+
           <div className="grid grid-cols-3 gap-2 mt-6">
             <button disabled={busy} onClick={() => act(completeRevision, 'Locked in 🎯')} className="btn-primary">✓ Done</button>
             <button disabled={busy} onClick={() => act(postponeRevision, 'Pushed to tomorrow')} className="btn-secondary">⏭️ Later</button>

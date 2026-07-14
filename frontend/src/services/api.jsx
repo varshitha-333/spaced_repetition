@@ -107,5 +107,11 @@ export const aiStreakCoach = (payload)=> api.post('/api/ai/streak-coach', payloa
 // NEW (Premium): auto-process an uploaded learning_id (mindmap / markdown / flashcards)
 export const aiAutoProcess = (learning_id) =>
   api.post('/api/ai/auto-process', { learning_id });
+// NEW (Premium): generate AI artifacts for a learning item
+export const aiGenerateArtifacts = (learningId, types = ['summary', 'keywords', 'quiz', 'flashcards', 'mindmap', 'revision_notes']) =>
+  api.post('/api/ai/generate', { learning_id: learningId, types });
+// NEW (Premium): get AI artifacts for a learning item
+export const aiGetArtifacts = (learningId) =>
+  api.get(`/api/ai/artifacts/${learningId}`);
 
 export default api;

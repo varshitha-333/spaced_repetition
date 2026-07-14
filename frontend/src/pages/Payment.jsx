@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import toast from 'react-hot-toast';
-import { redeemPremium, getPremiumStatus } from '../services/api';
+import { redeemPremium, getPremiumStatus, getNotificationPreferences } from '../services/api';
 import { useAuth } from '../hooks/useAuth';
 import Navbar from '../components/Navbar';
 
@@ -23,10 +23,15 @@ export default function Payment() {
   const [loading, setLoading] = useState(false);
   const [receipt, setReceipt] = useState(null);
   const [alreadyPremium, setAlreadyPremium] = useState(null);
+  const [smsStatus, setSmsStatus] = useState(null);
 
   useEffect(() => {
     getPremiumStatus()
       .then(r => { if (r.data?.is_premium) setAlreadyPremium(r.data); })
+      .catch(() => {});
+    
+    getNotificationPreferences()
+      .then(r => setSmsStatus(r.data))
       .catch(() => {});
   }, []);
 
@@ -74,6 +79,16 @@ export default function Payment() {
               {alreadyPremium.days_left} day{alreadyPremium.days_left !== 1 && 's'} left ·
               expires {new Date(alreadyPremium.expires_at).toLocaleDateString()}
             </p>
+            {/* SMS Status */}
+            {smsStatus && (
+              <div className="mb-4 p-3 bg-indigo-50 rounded-lg text-sm">
+                <div className="font-semibold mb-1">SMS Reminders</div>
+                <div className="text-ink-muted">
+                  {smsStatus.sms?.enabled ? '✅ Enabled' : '❌ Disabled'}
+                  {smsStatus.sms?.enabled && smsStatus.sms?.phone && ` (${smsStatus.sms.phone})`}
+                </div>
+              </div>
+            )}
             <div className="flex justify-center gap-3">
               <Link to="/premium" className="btn-primary">Try AI features →</Link>
               <Link to="/dashboard" className="btn-secondary">Back to dashboard</Link>
@@ -200,6 +215,21 @@ export default function Payment() {
                 <div className="flex justify-between"><span>Email</span><span>{receipt.email}</span></div>
                 <div className="flex justify-between border-t border-indigo-100 mt-2 pt-2"><span>Total paid</span><span>₹0</span></div>
               </div>
+              {/* SMS Status */}
+              {smsStatus && (
+                <div className="mb-6 p-3 bg-indigo-50 rounded-lg text-sm text-left">
+                  <div className="font-semibold mb-1">SMS Reminders</div>
+                  <div className="text-ink-muted">
+                    {smsStatus.sms?.enabled ? '✅ Enabled' : '❌ Disabled'}
+                    {smsStatus.sms?.enabled && smsStatus.sms?.phone && ` (${smsStatus.sms.phone})`}
+                  </div>
+                  {!smsStatus.sms?.enabled && (
+                    <Link to="/profile" className="text-indigo-600 hover:underline text-xs mt-1 inline-block">
+                      Enable SMS reminders →
+                    </Link>
+                  )}
+                </div>
+              )}
               <div className="flex justify-center gap-3">
                 {/* ✅ FIX: use onClick navigate instead of Link to force fresh load */}
                 <button onClick={() => nav('/premium')} className="btn-primary">Open AI Lab →</button>

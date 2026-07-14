@@ -5,7 +5,7 @@ import toast from 'react-hot-toast';
 import {
   getTodayRevisions, getOverdueRevisions, getRevisionStats,
   completeRevision, postponeRevision,
-  getPremiumStatus, aiStreakCoach,
+  getPremiumStatus, aiStreakCoach, getMe,
 } from '../services/api';
 import { useAuth } from '../hooks/useAuth';
 import Navbar from '../components/Navbar';
@@ -23,6 +23,7 @@ export default function Dashboard() {
   const [coachMsg, setCoachMsg] = useState('');
   const [busy, setBusy] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshingUser, setRefreshingUser] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -41,6 +42,21 @@ export default function Dashboard() {
     }
   }, []);
 
+  const refreshUserData = useCallback(async () => {
+    setRefreshingUser(true);
+    try {
+      const r = await getMe();
+      // Update user in auth context if needed
+      if (r.data?.user) {
+        // The useAuth hook should handle this internally
+      }
+    } catch (e) {
+      toast.error('Failed to refresh user data');
+    } finally {
+      setRefreshingUser(false);
+    }
+  }, []);
+
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
@@ -50,7 +66,7 @@ export default function Dashboard() {
       done_today: stats.completed_today || 0,
       due_today: today.length,
     }).then(r => setCoachMsg(r.data?.message || '')).catch(() => {});
-  }, [premium, stats, today.length]);
+  }, [premium?.is_premium, stats?.current_streak, stats?.streak, stats?.completed_today, today.length]);
 
   const handleComplete = async (id) => {
     setBusy(id);
@@ -64,11 +80,14 @@ export default function Dashboard() {
   };
 
   const driveConnected = !!user?.drive_connected;
+  const driveStatus = user?.drive_status || 'unknown'; // 'connected', 'credentials_missing', 'permissions_failed', 'unknown'
   const totalDue = today.length + overdue.length;
   const allDone = !loading && totalDue === 0;
   // FIX: use current_streak (new alias) with fallback to streak; total_learnings now present.
   const currentStreak = stats?.current_streak ?? stats?.streak ?? 0;
   const totalSaved    = stats?.total_learnings ?? 0;
+  const storageUsed   = stats?.storage_used || 0;
+  const storageLimit  = stats?.storage_limit || 100; // MB
 
   return (
     <div className="min-h-screen">
@@ -145,17 +164,33 @@ export default function Dashboard() {
           <QuickCard
             tone="peach" icon="📱"
             title="SMS reminders"
-            desc="Enable in your profile — one number, two friendly nudges per day."
+            desc={user?.sms_notifications_enabled ? 'SMS reminders enabled' : 'Enable daily revision reminders'}
             cta={user?.sms_notifications_enabled ? 'Manage' : 'Set up'}
             onClick={() => nav('/profile')}
           />
           <QuickCard
             tone="sage" icon={driveConnected ? '✅' : '🔗'}
-            title={driveConnected ? 'Google Drive connected' : 'Connect Google Drive'}
-            desc={driveConnected ? 'Your uploads sync to your own Drive automatically.' : 'Sync your resources to your own Drive folder.'}
+            title={driveConnected ? 'Google Drive Connected' : 'Connect Google Drive'}
+            desc={driveConnected ? 'Your uploads sync to your Drive automatically.' : 'Sync your resources to your own Drive folder.'}
             cta={driveConnected ? 'Manage' : 'Connect'}
             onClick={() => nav('/profile')}
           />
+        </section>
+
+        {/* Storage Status */}
+        <section className="mb-8">
+          <div className="card p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-semibold text-ink-muted">Storage Used</span>
+              <span className="text-sm font-medium">{storageUsed} MB / {storageLimit} MB</span>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-2">
+              <div 
+                className="bg-indigo-600 h-2 rounded-full transition-all" 
+                style={{ width: `${Math.min((storageUsed / storageLimit) * 100, 100)}%` }}
+              />
+            </div>
+          </div>
         </section>
 
         {!premium?.is_premium && (
@@ -239,12 +274,13 @@ function RevisionCard({ r, overdue, onDone, onLater, busy }) {
     <div className={`card p-4 card-hover ${overdue ? 'border-peach-200/80 bg-peach-50/40' : ''}`}>
       <div className="flex items-start gap-3">
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
             <span className={overdue ? 'pill-peach' : 'pill-indigo'}>
               {overdue ? 'Overdue' : `Day ${r.stage || r.day_number || ''}`}
             </span>
             {r.url && <a href={r.url} target="_blank" rel="noreferrer" className="text-xs text-indigo-600 hover:underline truncate">open ↗</a>}
             {r.supabase_url && <a href={r.supabase_url} target="_blank" rel="noreferrer" className="text-xs text-indigo-600 hover:underline">file ↗</a>}
+            {r.drive_link && <a href={r.drive_link} target="_blank" rel="noreferrer" className="text-xs text-emerald-600 hover:underline truncate">Drive ↗</a>}
           </div>
           <div className="font-semibold text-ink truncate">{r.heading || r.title || 'Untitled'}</div>
           {r.description && <div className="text-sm text-ink-muted line-clamp-2 mt-1">{r.description}</div>}

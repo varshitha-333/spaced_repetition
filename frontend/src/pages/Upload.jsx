@@ -13,6 +13,8 @@ export default function Upload() {
   const [text, setText] = useState('');
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [processingStatus, setProcessingStatus] = useState('');
   const [premium, setPremium] = useState(null);
 
   useEffect(() => {
@@ -25,20 +27,45 @@ export default function Upload() {
     else if (mode === 'url' && url) fd.append('url', url);
     else if (mode === 'text' && text.trim()) fd.append('text', text);
     else { toast.error('Add something first'); return; }
+    
     setBusy(true);
+    setUploadProgress(0);
+    setProcessingStatus('Uploading...');
+    
     try {
+      // Simulate upload progress
+      const progressInterval = setInterval(() => {
+        setUploadProgress(prev => {
+          if (prev >= 90) {
+            clearInterval(progressInterval);
+            return 90;
+          }
+          return prev + 10;
+        });
+      }, 100);
+
       const r = await uploadPreview(fd);
+      clearInterval(progressInterval);
+      setUploadProgress(100);
+      setProcessingStatus('Processing...');
       setPreview(r.data);
+      setProcessingStatus('');
+      toast.success('Preview generated successfully');
     } catch (e) {
-      // Show the real error so we don't bury the upload bug ever again.
+      setUploadProgress(0);
+      setProcessingStatus('');
       const msg = e.response?.data?.error || e.message || 'Preview failed';
       toast.error(msg);
-    } finally { setBusy(false); }
+    } finally { 
+      setBusy(false); 
+    }
   };
 
   const save = async () => {
     if (!preview) return;
     setBusy(true);
+    setProcessingStatus('Saving...');
+    
     try {
       const r = await uploadSave(preview);
       const learning_id = r.data?.learning_id;
@@ -48,17 +75,27 @@ export default function Upload() {
       // mindmap + summary + flashcards) in the background. The result is
       // saved on the learning row and surfaced inside AI Lab automatically.
       if (premium?.is_premium && learning_id) {
+        setProcessingStatus('Running AI auto-process...');
         toast('✨ Running AI auto-process in the background…', { duration: 3500 });
         aiAutoProcess(learning_id)
-          .then(() => toast.success('AI Lab assets ready for this upload'))
-          .catch(() => {/* silent — user can still trigger it from AI Lab */});
+          .then(() => {
+            setProcessingStatus('');
+            toast.success('AI Lab assets ready for this upload');
+          })
+          .catch(() => {
+            setProcessingStatus('');
+            // silent — user can still trigger it from AI Lab
+          });
       }
 
-      nav('/dashboard');
+      setTimeout(() => nav('/dashboard'), premium?.is_premium ? 2000 : 500);
     } catch (e) {
+      setProcessingStatus('');
       const msg = e.response?.data?.error || 'Save failed';
       toast.error(msg);
-    } finally { setBusy(false); }
+    } finally { 
+      setBusy(false); 
+    }
   };
 
   return (
@@ -79,7 +116,7 @@ export default function Upload() {
 
         <div className="card-quiet inline-flex p-1 mb-5">
           {[
-            { k: 'file', l: '📄 File / PDF' },
+            { k: 'file', l: '📄 File' },
             { k: 'url',  l: '🔗 Link' },
             { k: 'text', l: '✏️ Paste text' },
           ].map(t => (
@@ -93,10 +130,10 @@ export default function Upload() {
         <div className="card p-6">
           {mode === 'file' && (
             <label className="block border-2 border-dashed border-indigo-200 rounded-2xl p-10 text-center cursor-pointer hover:border-indigo-400 transition">
-              <input type="file" className="hidden" onChange={e => setFile(e.target.files?.[0] || null)} accept=".pdf,.docx,.txt,.md" />
+              <input type="file" className="hidden" onChange={e => setFile(e.target.files?.[0] || null)} accept=".pdf,.docx,.doc,.ppt,.pptx,.txt,.md,.jpg,.jpeg,.png,.gif,.bmp,.webp" />
               <div className="text-4xl mb-2">📄</div>
               <div className="font-semibold">{file?.name || 'Click to choose a file'}</div>
-              <div className="text-xs text-ink-muted mt-1">PDF · DOCX · TXT · MD</div>
+              <div className="text-xs text-ink-muted mt-1">PDF · DOCX · PPT · TXT · Images</div>
             </label>
           )}
           {mode === 'url' && (
@@ -107,8 +144,21 @@ export default function Upload() {
               value={text} onChange={e => setText(e.target.value)} />
           )}
 
+          {/* Upload Progress */}
+          {uploadProgress > 0 && uploadProgress < 100 && (
+            <div className="mt-4">
+              <div className="flex justify-between text-xs text-ink-muted mb-1">
+                <span>{processingStatus}</span>
+                <span>{uploadProgress}%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2">
+                <div className="bg-indigo-600 h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
+              </div>
+            </div>
+          )}
+
           <button onClick={runPreview} disabled={busy} className="btn-primary mt-4">
-            {busy ? '…' : '✨ Generate AI title & description'}
+            {busy ? 'Processing…' : '✨ Generate AI title & description'}
           </button>
         </div>
 
@@ -120,11 +170,19 @@ export default function Upload() {
               onChange={e => setPreview({ ...preview, heading: e.target.value })} />
             <textarea rows={3} className="input mb-4" value={preview.description || ''}
               onChange={e => setPreview({ ...preview, description: e.target.value })} />
+            
+            {/* Processing Status */}
+            {processingStatus && (
+              <div className="mb-4 p-3 bg-indigo-50 rounded-lg text-sm text-indigo-700">
+                {processingStatus}
+              </div>
+            )}
+            
             <div className="flex gap-2">
               <button onClick={save} disabled={busy} className="btn-primary">
-                {busy ? '…' : 'Save & schedule revisions'}
+                {busy ? 'Saving…' : 'Save & schedule revisions'}
               </button>
-              <button onClick={() => setPreview(null)} className="btn-secondary">Discard</button>
+              <button onClick={() => setPreview(null)} disabled={busy} className="btn-secondary">Discard</button>
             </div>
           </motion.div>
         )}
