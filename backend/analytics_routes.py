@@ -54,9 +54,12 @@ def analytics_overview():
         # Get revisions count
         revisions = _supabase.table('revisions').select('*').eq('user_id', uid).execute().data or []
         
-        # Get AI artifacts count
-        ai_artifacts = _supabase.table('ai_artifacts').select('*').execute().data or []
-        user_ai_artifacts = [a for a in ai_artifacts if _supabase.table('learnings').select('user_id').eq('id', a.get('learning_id')).execute().data and _supabase.table('learnings').select('user_id').eq('id', a.get('learning_id')).execute().data[0].get('user_id') == uid]
+        # Get AI artifacts count - efficient query using learning IDs
+        learning_ids = [l['id'] for l in learnings]
+        user_ai_artifacts = []
+        if learning_ids:
+            ai_artifacts = _supabase.table('ai_artifacts').select('*').in_('learning_id', learning_ids).execute().data or []
+            user_ai_artifacts = ai_artifacts
         
         # Count by artifact type
         flashcards = len([a for a in user_ai_artifacts if a.get('artifact_type') == 'flashcards'])
