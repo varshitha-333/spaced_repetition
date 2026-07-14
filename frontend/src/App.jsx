@@ -14,6 +14,7 @@ import Pricing from './pages/Pricing';
 import Payment from './pages/Payment';
 import Profile from './pages/Profile';
 import PremiumLab from './pages/PremiumLab';
+import Analytics from './pages/Analytics';
 import Privacy from './pages/Privacy';        // NEW \u2014 needed for Google OAuth verification
 import Terms from './pages/Terms';            // NEW \u2014 needed for Google OAuth verification
 import LoadingScreen from './components/LoadingScreen';
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="/payment" element={<Private><Payment /></Private>} />
           <Route path="/profile" element={<Private><Profile /></Private>} />
           <Route path="/premium" element={<Private><PremiumLab /></Private>} />
+          <Route path="/analytics" element={<Private><Analytics /></Private>} />
 
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

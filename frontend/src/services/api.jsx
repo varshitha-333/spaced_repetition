@@ -114,4 +114,17 @@ export const aiGenerateArtifacts = (learningId, types = ['summary', 'keywords', 
 export const aiGetArtifacts = (learningId) =>
   api.get(`/api/ai/artifacts/${learningId}`);
 
+// Admin endpoints
+export const getAdminMetrics = () => api.get('/api/admin/metrics');
+export const getDeadLetterQueue = () => api.get('/api/admin/dead-letter');
+export const retryDeadLetterJob = (jobId) => api.post(`/api/admin/dead-letter/${jobId}/retry`);
+
+// Analytics endpoints
+export const getAnalyticsOverview = () => api.get('/api/analytics/overview');
+export const getRevisionProgress = () => api.get('/api/analytics/revision-progress');
+export const getTodayAnalytics = () => api.get('/api/analytics/today');
+export const getStreakAnalytics = () => api.get('/api/analytics/streak');
+export const getCompletionHistory = () => api.get('/api/analytics/completion-history');
+export const getSmsStatus = () => api.get('/api/analytics/sms-status');
+
 export default api;

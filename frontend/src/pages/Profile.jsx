@@ -14,7 +14,7 @@ export default function Profile() {
   const { refreshUser } = useAuth();
   const [p, setP] = useState(null);
   const [form, setForm] = useState({ display_name: '', email: '', phone: '' });
-  const [sms, setSms] = useState({ enabled: false, phone: '' });
+  const [sms, setSms] = useState({ enabled: false, countryCode: '+91', phone: '' });
   const [review, setReview] = useState({ rating: 5, text: '' });
   const [tab, setTab] = useState('profile');
 
@@ -30,9 +30,21 @@ export default function Profile() {
         phone: data.phone || '',
       });
       // ✅ FIX: sync SMS state from profile on load
+      // Parse country code from existing phone number if present
+      let countryCode = '+91';
+      let phoneOnly = data.phone || '';
+      if (phoneOnly && phoneOnly.startsWith('+')) {
+        // Extract country code (first 1-4 digits after +)
+        const match = phoneOnly.match(/^\+(\d{1,4})(\d+)$/);
+        if (match) {
+          countryCode = '+' + match[1];
+          phoneOnly = match[2];
+        }
+      }
       setSms({
         enabled: !!data.sms_enabled,
-        phone: data.phone || '',
+        countryCode: countryCode,
+        phone: phoneOnly,
       });
     } catch (e) {
       toast.error('Failed to load profile');
@@ -57,13 +69,15 @@ export default function Profile() {
       toast.error('Phone number required to enable SMS');
       return;
     }
+    // Combine country code and phone number
+    const fullPhone = sms.countryCode + sms.phone.replace(/\D/g, ''); // Remove non-digits
     try {
-      const r = await enableSms(sms.phone.trim(), sms.enabled);
+      const r = await enableSms(fullPhone, sms.enabled);
       const mode = r.data.sms?.mode;
       toast.success(mode === 'real' ? 'SMS settings saved!' : 'SMS settings saved (mock mode — add Twilio env vars for real SMS)');
       // ✅ FIX: also save phone to profile so it persists visibly
       if (sms.phone.trim()) {
-        await updateProfile({ phone: sms.phone.trim() });
+        await updateProfile({ phone: fullPhone });
       }
       load();
       refreshUser();
@@ -195,7 +209,7 @@ export default function Profile() {
             <div>
               <div className="font-semibold mb-1">Daily SMS reminders</div>
               <div className="text-sm text-ink-muted">
-                Two calm nudges per day. Morning at <b>8 AM</b> · Night at <b>9 PM</b>.
+                Get daily SMS reminders for your revisions.
               </div>
             </div>
             <label className="flex items-center gap-3 cursor-pointer">
@@ -204,9 +218,51 @@ export default function Profile() {
                 className="w-5 h-5 accent-indigo-600" />
               <span>Enable SMS reminders</span>
             </label>
-            <Field label="SMS number" value={sms.phone}
-              onChange={v => setSms({ ...sms, phone: v })}
-              placeholder="+91 9876543210" />
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <div className="label mb-1">Country code</div>
+                <select 
+                  className="input"
+                  value={sms.countryCode}
+                  onChange={e => setSms({ ...sms, countryCode: e.target.value })}
+                >
+                  <option value="+1">+1 (USA/Canada)</option>
+                  <option value="+44">+44 (UK)</option>
+                  <option value="+91">+91 (India)</option>
+                  <option value="+61">+61 (Australia)</option>
+                  <option value="+81">+81 (Japan)</option>
+                  <option value="+86">+86 (China)</option>
+                  <option value="+49">+49 (Germany)</option>
+                  <option value="+33">+33 (France)</option>
+                  <option value="+971">+971 (UAE)</option>
+                  <option value="+65">+65 (Singapore)</option>
+                  <option value="+353">+353 (Ireland)</option>
+                  <option value="+39">+39 (Italy)</option>
+                  <option value="+34">+34 (Spain)</option>
+                  <option value="+55">+55 (Brazil)</option>
+                  <option value="+52">+52 (Mexico)</option>
+                  <option value="+27">+27 (South Africa)</option>
+                  <option value="+64">+64 (New Zealand)</option>
+                  <option value="+31">+31 (Netherlands)</option>
+                  <option value="+46">+46 (Sweden)</option>
+                  <option value="+47">+47 (Norway)</option>
+                  <option value="+45">+45 (Denmark)</option>
+                </select>
+              </div>
+              <div className="flex-2">
+                <div className="label mb-1">Phone number</div>
+                <input 
+                  className="input"
+                  value={sms.phone}
+                  onChange={e => setSms({ ...sms, phone: e.target.value.replace(/\D/g, '') })}
+                  placeholder="9876543210"
+                  maxLength={15}
+                />
+              </div>
+            </div>
+            <div className="text-xs text-ink-muted">
+              Combined format: {sms.countryCode}{sms.phone}
+            </div>
             <div className="flex flex-wrap gap-2">
               <button onClick={saveSms} className="btn-primary">Save SMS settings</button>
               <button onClick={sendTest} className="btn-secondary">Send test SMS</button>

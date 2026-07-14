@@ -177,6 +177,23 @@ export default function Dashboard() {
           />
         </section>
 
+        <section className="grid md:grid-cols-2 gap-4 mb-8">
+          <QuickCard
+            tone="indigo" icon="📊"
+            title="View Analytics"
+            desc="Track your learning progress, revision habits, and streaks."
+            cta="View analytics"
+            onClick={() => nav('/analytics')}
+          />
+          <QuickCard
+            tone="peach" icon="📅"
+            title="Upcoming Revisions"
+            desc="See your revision schedule for the next 30 days."
+            cta="View schedule"
+            onClick={() => nav('/upcoming')}
+          />
+        </section>
+
         {/* Storage Status */}
         <section className="mb-8">
           <div className="card p-4">
