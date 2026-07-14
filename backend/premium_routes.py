@@ -150,6 +150,38 @@ def normalize_phone_number(phone: str) -> str:
     return phone
 
 
+def _shorten_title_with_ai(title: str) -> str:
+    """Use AI to shorten a title to 2 words for SMS."""
+    if not title or title == "Untitled":
+        return "Untitled"
+    
+    # If AI generator is not available, fall back to simple truncation
+    if not _ai_generator:
+        words = title.split()
+        return " ".join(words[:2]) if len(words) >= 2 else title
+    
+    try:
+        prompt = f"Shorten this title to exactly 2 words maximum, keeping the core meaning: '{title}'\n\nReturn only the 2-word title, nothing else."
+        result = _ai_generator.generate(prompt, max_tokens=20)
+        
+        if result and result.strip():
+            shortened = result.strip()
+            # Ensure it's not too long
+            words = shortened.split()
+            if len(words) > 2:
+                shortened = " ".join(words[:2])
+            return shortened if shortened else title
+        else:
+            # Fallback to simple truncation
+            words = title.split()
+            return " ".join(words[:2]) if len(words) >= 2 else title
+    except Exception as e:
+        _logger.warning(f"AI title shortening failed: {e}, falling back to truncation")
+        # Fallback to simple truncation
+        words = title.split()
+        return " ".join(words[:2]) if len(words) >= 2 else title
+
+
 def _send_sms_real_or_mock(to_phone: str, body: str) -> dict:
     """Try real Twilio if creds present, else mock-log."""
     # Normalize phone number to E.164 format
@@ -339,6 +371,7 @@ def sms_cron(slot):
     Public cron-style endpoint (call from external scheduler, e.g. cron-job.org).
     slot = 'morning' or 'night'.
     Iterates all users with sms_notifications_enabled=True.
+    Sends SMS with revision details (count and titles).
     """
     if slot not in ("morning", "night"):
         return jsonify({"error": "bad_slot"}), 400
@@ -352,23 +385,68 @@ def sms_cron(slot):
     except Exception as e:
         return jsonify({"error": f"db: {e}"}), 500
 
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date()
+
     sent = []
     for row in users:
         phone = row.get("notification_phone") or ""
         if not phone:
             continue
-        if slot == "morning":
-            body = (
-                "🌅 Good morning! Time for today's spaced revisions on LearnFlow. "
-                "Open the app to see what's due — small wins compound."
-            )
-        else:
-            body = (
-                "🌙 Night check-in: how did today go? "
-                "Mark your revisions complete on LearnFlow — your streak is watching you. ✨"
-            )
+        
+        user_id = row["user_id"]
+        
+        # Fetch today's revisions for this user
+        try:
+            revisions = _supabase.table("revisions").select(
+                "id,learning_id,scheduled_date,completed"
+            ).eq("user_id", user_id).eq("completed", False).lte("scheduled_date", today.isoformat()).execute().data or []
+            
+            # Fetch learning titles
+            learning_ids = [r.get("learning_id") for r in revisions if r.get("learning_id")]
+            titles = {}
+            if learning_ids:
+                learnings = _supabase.table("learnings").select("id,title").in_("id", learning_ids).execute().data or []
+                titles = {l["id"]: l.get("title", "Untitled") for l in learnings}
+            
+            # Build revision list with titles (shortened using AI)
+            revision_list = []
+            for rev in revisions[:5]:  # Limit to first 5 revisions
+                lid = rev.get("learning_id")
+                title = titles.get(lid, "Untitled")
+                # Use AI to shorten title to 2 words
+                short_title = _shorten_title_with_ai(title)
+                revision_list.append(short_title)
+            
+            revision_count = len(revisions)
+            
+            if slot == "morning":
+                if revision_count > 0:
+                    body = (
+                        f"🌅 Good morning! You have {revision_count} revision(s) due today:\n"
+                        f"• {', '.join(revision_list)}\n"
+                        f"Open LearnFlow to review them!"
+                    )
+                else:
+                    body = "🌅 Good morning! No revisions due today. Keep up the great work!"
+            else:
+                if revision_count > 0:
+                    body = (
+                        f"🌙 Night check-in: You had {revision_count} revision(s) today.\n"
+                        f"Did you complete them? Your streak is counting on you! ✨"
+                    )
+                else:
+                    body = "🌙 Night check-in: No revisions today. See you tomorrow! ✨"
+        except Exception as e:
+            _logger.error(f"Failed to fetch revisions for user {user_id}: {e}")
+            # Fallback to generic message
+            if slot == "morning":
+                body = "🌅 Good morning! Time for today's revisions on LearnFlow."
+            else:
+                body = "🌙 Night check-in from LearnFlow!"
+        
         r = _send_sms_real_or_mock(phone, body)
-        sent.append({"user_id": row["user_id"], "result": r})
+        sent.append({"user_id": user_id, "result": r, "revision_count": revision_count})
 
     return jsonify({"ok": True, "slot": slot, "count": len(sent), "sent": sent})
 
