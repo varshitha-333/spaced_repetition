@@ -150,6 +150,7 @@ NOTIFICATION_QUOTES = [
 app = Flask(__name__)
 # NOTE: premium blueprint is registered LATER, after decode_token is defined (see below).
 from premium_routes import premium_bp, init_premium
+from analytics_routes import analytics_bp, init_analytics
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-to-a-strong-secret-in-production")
 
 # Initialize rate limiter with app
@@ -457,6 +458,8 @@ def decode_token(token: str) -> dict:
 # ════════════════════════════════════════════════════════════════
 init_premium(app, supabase, logger, decode_token)
 app.register_blueprint(premium_bp)
+init_analytics(supabase, decode_token)
+app.register_blueprint(analytics_bp)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -2386,6 +2389,99 @@ def api_download(supabase_path):
     if url:
         return jsonify({"download_url": url})
     return jsonify({"error": "File not found"}), 404
+
+
+# ─── ADMIN ENDPOINTS ───
+@app.route("/api/admin/metrics")
+@login_required
+def api_admin_metrics():
+    """Get system metrics for admin dashboard."""
+    uid = request.user_id
+    # TODO: Add admin role check
+    try:
+        # Get cron execution stats
+        cron_executions = supabase.table('cron_executions').select('*').order('started_at', desc=True).limit(10).execute().data or []
+        
+        # Get recent metrics
+        recent_metrics = supabase.table('metrics').select('*').order('timestamp', desc=True).limit(100).execute().data or []
+        
+        # Get dead letter queue count
+        dlq_count = len(supabase.table('dead_letter_queue').select('id').execute().data or [])
+        
+        # Calculate stats
+        successful_cron = len([e for e in cron_executions if e.get('status') == 'completed'])
+        failed_cron = len([e for e in cron_executions if e.get('status') == 'failed'])
+        
+        last_execution = cron_executions[0].get('started_at') if cron_executions else None
+        
+        return jsonify({
+            "cron": {
+                "last_execution": last_execution,
+                "successful": successful_cron,
+                "failed": failed_cron,
+                "retried": 0  # TODO: Track retries
+            },
+            "sms": {
+                "sent": 0,  # TODO: Track SMS metrics
+                "failed": 0,
+                "pending": 0
+            },
+            "queue": {
+                "length": 0,  # TODO: Track queue length
+                "processing": 0
+            },
+            "dead_letter": {
+                "count": dlq_count
+            },
+            "performance": {
+                "avg_response_time": 0,  # TODO: Track performance
+                "p95_response_time": 0,
+                "requests_per_minute": 0
+            },
+            "errors": []  # TODO: Track recent errors
+        })
+    except Exception as e:
+        logger.error(f"Admin metrics error: {e}")
+        return jsonify({"error": "Failed to fetch metrics"}), 500
+
+
+@app.route("/api/admin/dead-letter")
+@login_required
+def api_admin_dead_letter():
+    """Get dead-letter queue items."""
+    uid = request.user_id
+    # TODO: Add admin role check
+    try:
+        dlq = supabase.table('dead_letter_queue').select('*').order('created_at', desc=True).limit(50).execute().data or []
+        return jsonify({"dead_letter": dlq})
+    except Exception as e:
+        logger.error(f"Dead-letter queue error: {e}")
+        return jsonify({"error": "Failed to fetch dead-letter queue"}), 500
+
+
+@app.route("/api/admin/dead-letter/<job_id>/retry", methods=["POST"])
+@login_required
+def api_admin_retry_dead_letter(job_id):
+    """Retry a dead-letter job."""
+    uid = request.user_id
+    # TODO: Add admin role check
+    try:
+        dlq = supabase.table('dead_letter_queue').select('*').eq('id', job_id).execute()
+        if not dlq.data:
+            return jsonify({"error": "Job not found"}), 404
+        
+        job = dlq.data[0]
+        # TODO: Implement retry logic based on job_type
+        supabase.table('dead_letter_queue').update({
+            'status': 'retrying',
+            'resolved_at': datetime.utcnow().isoformat(),
+            'resolved_by': f"admin_{uid}"
+        }).eq('id', job_id).execute()
+        
+        return jsonify({"message": "Job marked for retry"})
+    except Exception as e:
+        logger.error(f"Retry dead-letter error: {e}")
+        return jsonify({"error": "Failed to retry job"}), 500
 
 
 if __name__ == "__main__":

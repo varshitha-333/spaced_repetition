@@ -458,8 +458,28 @@ def profile():
     if not update:
         return jsonify({"ok": True, "noop": True})
     try:
-        _supabase.table("user_state").update(update).eq("user_id", u["id"]).execute()
+        # First check if user_state exists, create if not
+        existing = _supabase.table("user_state").select("*").eq("user_id", u["id"]).execute()
+        if not existing.data:
+            # Create user_state record
+            _supabase.table("user_state").insert({
+                "user_id": u["id"],
+                "drive_connected": False,
+                "spreadsheet_id": None,
+                "current_streak": 0,
+                "last_completion_date": None,
+                "google_drive_credentials": None,
+                "notification_phone": update.get("notification_phone"),
+                "sms_notifications_enabled": update.get("sms_notifications_enabled", False),
+                "notification_timezone": "UTC",
+                "notification_hour": 8,
+                "last_sms_sent_date": None
+            }).execute()
+        else:
+            # Update existing record
+            _supabase.table("user_state").update(update).eq("user_id", u["id"]).execute()
     except Exception as e:
+        _logger.error(f"[PROFILE UPDATE] failed: {e}")
         return jsonify({"error": str(e)}), 500
     return jsonify({"ok": True, "updated": list(update.keys())})
 
