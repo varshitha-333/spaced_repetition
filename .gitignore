@@ -12,7 +12,6 @@ frontend/node_modules
 
 # Environment
 .env
-backend/.env.example
 
 .dev.vars
 
@@ -36,3 +35,5 @@ logs/
 *.tmp
 *.bak
 /tmp/
+AUDIT_FIXES_SUMMARY.md
+

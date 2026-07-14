@@ -7,6 +7,8 @@ import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, session, redirect as flask_redirect
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 from PyPDF2 import PdfReader
 from docx import Document
@@ -14,6 +16,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from functools import wraps
@@ -39,6 +42,49 @@ logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.ERROR)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ─── ENVIRONMENT VALIDATION ───
+def validate_environment():
+    """Validate required environment variables at startup."""
+    required_vars = {
+        'SUPABASE_URL': os.getenv("SUPABASE_URL"),
+        'SUPABASE_KEY': os.getenv("SUPABASE_KEY"),
+        'FLASK_SECRET_KEY': os.getenv("FLASK_SECRET_KEY"),
+    }
+    
+    missing = [k for k, v in required_vars.items() if not v]
+    
+    if missing:
+        logger.error(f"❌ CRITICAL: Missing required environment variables: {', '.join(missing)}")
+        logger.error("Please set these in your .env file or Render environment variables.")
+        logger.error("See backend/.env.example for the required format.")
+    
+    optional_vars = {
+        'GOOGLE_OAUTH_CLIENT_ID': os.getenv("GOOGLE_OAUTH_CLIENT_ID"),
+        'GOOGLE_OAUTH_CLIENT_SECRET': os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
+        'GEMINI_API_KEY': os.getenv("GEMINI_API_KEY"),
+        'TWILIO_ACCOUNT_SID': os.getenv("TWILIO_ACCOUNT_SID"),
+        'TWILIO_AUTH_TOKEN': os.getenv("TWILIO_AUTH_TOKEN"),
+        'TWILIO_FROM_PHONE': os.getenv("TWILIO_FROM_PHONE"),
+    }
+    
+    optional_missing = [k for k, v in optional_vars.items() if not v]
+    if optional_missing:
+        logger.warning(f"⚠️  Optional services not configured: {', '.join(optional_missing)}")
+        logger.warning("These features will be unavailable: Google OAuth, Gemini AI, Twilio SMS")
+    
+    return len(missing) == 0
+
+# Validate environment on import
+_env_valid = validate_environment()
+
+# ─── RATE LIMITING ───
+limiter = Limiter(
+    get_remote_address,
+    app=None,  # Will be set after app creation
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://",
+)
+
 # ─── CONFIG ───
 SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
@@ -56,6 +102,8 @@ if SUPABASE_URL and SUPABASE_KEY:
         logger.info("✅ Supabase client initialised")
     except Exception as e:
         logger.error(f"❌ Supabase init failed: {e}")
+        logger.error(f"Supabase URL: {SUPABASE_URL[:20]}... (truncated)")
+        logger.error(f"Supabase Key: {SUPABASE_KEY[:20]}... (truncated)")
 else:
     logger.warning("⚠️  SUPABASE_URL / SUPABASE_KEY missing — backend in degraded mode")
 
@@ -77,7 +125,7 @@ logger.info("══════════════════════�
 
 APP_FOLDER_NAME = "Learning Intake"
 SHEET_TITLE = "Learning Intake Log"
-REVISION_INTERVALS = [1, 3, 6, 29, 179]
+REVISION_INTERVALS = [1, 4, 7, 30, 180]
 
 REVISION_STAGE_LABELS = [f"Day {days}" for days in REVISION_INTERVALS]
 DEFAULT_NOTIFICATION_HOUR = int(os.getenv("DEFAULT_NOTIFICATION_HOUR", "8"))
@@ -103,6 +151,9 @@ app = Flask(__name__)
 # NOTE: premium blueprint is registered LATER, after decode_token is defined (see below).
 from premium_routes import premium_bp, init_premium
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-to-a-strong-secret-in-production")
+
+# Initialize rate limiter with app
+limiter.init_app(app)
 
 # ProxyFix so request.is_secure is correct behind Render's load balancer
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
@@ -184,14 +235,55 @@ def health_root():
 
 @app.route("/api/health")
 def api_health():
-    return jsonify({
+    """Comprehensive health check endpoint."""
+    health_status = {
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat(),
-        "supabase": bool(supabase),
+        "services": {}
+    }
+    
+    # Check Supabase connectivity
+    if supabase:
+        try:
+            def check_db():
+                # Simple query to test connectivity
+                supabase.table('users').select('id').limit(1).execute()
+            retry_database_operation(check_db, max_retries=1, backoff_factor=1)
+            health_status["services"]["supabase"] = {"status": "connected", "url": SUPABASE_URL[:20] + "..."}
+        except Exception as e:
+            health_status["services"]["supabase"] = {"status": "disconnected", "error": str(e)}
+            health_status["status"] = "degraded"
+    else:
+        health_status["services"]["supabase"] = {"status": "not_configured"}
+        health_status["status"] = "degraded"
+    
+    # Check Google OAuth
+    if GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET:
+        health_status["services"]["google_oauth"] = {"status": "configured"}
+    else:
+        health_status["services"]["google_oauth"] = {"status": "not_configured"}
+    
+    # Check Gemini API
+    if GEMINI_API_KEY:
+        health_status["services"]["gemini_ai"] = {"status": "configured"}
+    else:
+        health_status["services"]["gemini_ai"] = {"status": "not_configured"}
+    
+    # Check Twilio
+    if is_twilio_configured():
+        health_status["services"]["twilio_sms"] = {"status": "configured"}
+    else:
+        health_status["services"]["twilio_sms"] = {"status": "not_configured"}
+    
+    # Environment info
+    health_status["environment"] = {
         "frontend_url": FRONTEND_URL,
         "backend_url": BACKEND_URL,
         "auth_method": "JWT",
-    })
+        "debug_auth": DEBUG_AUTH
+    }
+    
+    return jsonify(health_status)
 
 # ═══════════════════════════════════════════════════════
 #  PRIVACY POLICY + TERMS  (Public, no-login pages — required for Google OAuth verification.
@@ -381,13 +473,117 @@ def login_required(f):
     return decorated
 
 
+# ─── INPUT VALIDATION ───
+import re
+from urllib.parse import urlparse
+
+def validate_email(email):
+    """Validate email format."""
+    if not email:
+        return False, "Email is required"
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(pattern, email):
+        return False, "Invalid email format"
+    if len(email) > 255:
+        return False, "Email too long"
+    return True, None
+
+def validate_username(username):
+    """Validate username format."""
+    if not username:
+        return False, "Username is required"
+    if len(username) < 3:
+        return False, "Username must be at least 3 characters"
+    if len(username) > 30:
+        return False, "Username too long (max 30 characters)"
+    pattern = r'^[a-zA-Z0-9_-]+$'
+    if not re.match(pattern, username):
+        return False, "Username can only contain letters, numbers, underscores, and hyphens"
+    return True, None
+
+def validate_password(password):
+    """Validate password strength."""
+    if not password:
+        return False, "Password is required"
+    if len(password) < 6:
+        return False, "Password must be at least 6 characters"
+    if len(password) > 128:
+        return False, "Password too long"
+    return True, None
+
+def validate_url(url):
+    """Validate URL format and safety."""
+    if not url:
+        return True, None  # Optional field
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return False, "Invalid URL format"
+        if parsed.scheme not in ['http', 'https']:
+            return False, "URL must use http or https"
+        # Block localhost and private IPs in production
+        if parsed.hostname in ['localhost', '127.0.0.1', '0.0.0.0']:
+            return False, "URL cannot point to localhost"
+        return True, None
+    except Exception:
+        return False, "Invalid URL format"
+
+def validate_phone_number(phone):
+    """Validate phone number format (international)."""
+    if not phone:
+        return True, None  # Optional field
+    # Remove spaces, dashes, parentheses
+    cleaned = re.sub(r'[\s\-\(\)]', '', phone)
+    # Basic international format: + followed by 10-15 digits
+    pattern = r'^\+[1-9]\d{9,14}$'
+    if not re.match(pattern, cleaned):
+        return False, "Invalid phone number format. Use international format: +1234567890"
+    return True, None
+
 # ─── DATABASE HELPERS ───
+import time
+
+def retry_database_operation(operation, max_retries=3, backoff_factor=2):
+    """
+    Retry database operations with exponential backoff.
+    Handles transient network errors and connection issues.
+    """
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except Exception as e:
+            last_error = e
+            error_msg = str(e).lower()
+            # Check if it's a transient error (network-related)
+            is_transient = any(keyword in error_msg for keyword in [
+                'name or service not known',
+                'connection',
+                'timeout',
+                'network',
+                'temporary'
+            ])
+            
+            if not is_transient:
+                # Non-transient error, don't retry
+                raise
+            
+            if attempt < max_retries - 1:
+                wait_time = backoff_factor ** attempt
+                logger.warning(f"Database operation failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                time.sleep(wait_time)
+    
+    logger.error(f"Database operation failed after {max_retries} retries: {last_error}")
+    raise last_error
+
 def get_user_by_username(username):
     if not supabase:
         return None
     try:
-        r = supabase.table('users').select('*').eq('username', username).execute()
-        return r.data[0] if r.data else None
+        def operation():
+            r = supabase.table('users').select('*').eq('username', username).execute()
+            return r.data[0] if r.data else None
+        return retry_database_operation(operation)
     except Exception as e:
         logger.error(f"get_user_by_username error: {e}")
         return None
@@ -396,8 +592,10 @@ def get_user_by_email(email):
     if not supabase:
         return None
     try:
-        r = supabase.table('users').select('*').eq('email', email).execute()
-        return r.data[0] if r.data else None
+        def operation():
+            r = supabase.table('users').select('*').eq('email', email).execute()
+            return r.data[0] if r.data else None
+        return retry_database_operation(operation)
     except Exception as e:
         logger.error(f"get_user_by_email error: {e}")
         return None
@@ -407,8 +605,10 @@ def get_user_by_id(user_id):
     if not supabase:
         return None
     try:
-        r = supabase.table('users').select('*').eq('id', user_id).execute()
-        return r.data[0] if r.data else None
+        def operation():
+            r = supabase.table('users').select('*').eq('id', user_id).execute()
+            return r.data[0] if r.data else None
+        return retry_database_operation(operation)
     except Exception as e:
         logger.error(f"get_user_by_id error: {e}")
         return None
@@ -418,31 +618,33 @@ def create_user(username, password_hash, email):
     if not supabase:
         return None, "Database not configured (SUPABASE_URL/SUPABASE_KEY missing)"
     try:
-        r = supabase.table('users').insert({
-            'username': username,
-            'password_hash': password_hash,
-            'email': email
-        }).execute()
-        if not r.data:
-            return None, "Insert returned no rows (check RLS policies on 'users' table)"
-        uid = r.data[0]['id']
-        try:
-            supabase.table('user_state').insert({
-                'user_id': uid,
-                'drive_connected': False,
-                'spreadsheet_id': None,
-                'current_streak': 0,
-                'last_completion_date': None,
-                'google_drive_credentials': None,
-                'notification_phone': None,
-                'sms_notifications_enabled': False,
-                'notification_timezone': 'UTC',
-                'notification_hour': DEFAULT_NOTIFICATION_HOUR,
-                'last_sms_sent_date': None
+        def operation():
+            r = supabase.table('users').insert({
+                'username': username,
+                'password_hash': password_hash,
+                'email': email
             }).execute()
-        except Exception as e:
-            logger.warning(f"user_state insert failed (non-fatal): {e}")
-        return uid, None
+            if not r.data:
+                return None, "Insert returned no rows (check RLS policies on 'users' table)"
+            uid = r.data[0]['id']
+            try:
+                supabase.table('user_state').insert({
+                    'user_id': uid,
+                    'drive_connected': False,
+                    'spreadsheet_id': None,
+                    'current_streak': 0,
+                    'last_completion_date': None,
+                    'google_drive_credentials': None,
+                    'notification_phone': None,
+                    'sms_notifications_enabled': False,
+                    'notification_timezone': 'UTC',
+                    'notification_hour': DEFAULT_NOTIFICATION_HOUR,
+                    'last_sms_sent_date': None
+                }).execute()
+            except Exception as e:
+                logger.warning(f"user_state insert failed (non-fatal): {e}")
+            return uid, None
+        return retry_database_operation(operation)
     except Exception as e:
         err = f"{type(e).__name__}: {str(e)}"
         logger.error(f"Create user error: {err}\n{traceback.format_exc()}")
@@ -453,7 +655,8 @@ def get_user_state(user_id):
     try:
         r = supabase.table('user_state').select('*').eq('user_id', user_id).execute()
         return r.data[0] if r.data else None
-    except:
+    except Exception as e:
+        logger.error(f"get_user_state error: {e}")
         return None
 
 def update_user_state(user_id, **kwargs):
@@ -461,7 +664,8 @@ def update_user_state(user_id, **kwargs):
     try:
         supabase.table('user_state').update(kwargs).eq('user_id', user_id).execute()
         return True
-    except:
+    except Exception as e:
+        logger.error(f"update_user_state error: {e}")
         return False
 
 def save_drive_credentials(user_id, creds_json):
@@ -472,7 +676,8 @@ def save_drive_credentials(user_id, creds_json):
             'drive_connected': True
         }).eq('user_id', user_id).execute()
         return True
-    except:
+    except Exception as e:
+        logger.error(f"save_drive_credentials error: {e}")
         return False
 
 def get_drive_credentials(user_id):
@@ -482,7 +687,8 @@ def get_drive_credentials(user_id):
         if r.data and r.data[0]['google_drive_credentials']:
             return r.data[0]['google_drive_credentials']
         return None
-    except:
+    except Exception as e:
+        logger.error(f"get_drive_credentials error: {e}")
         return None
 
 
@@ -701,7 +907,8 @@ def update_streak(user_id):
                     streak = 1
                 update_user_state(user_id, current_streak=streak, last_completion_date=today)
         return streak
-    except:
+    except Exception as e:
+        logger.error(f"update_streak error: {e}")
         return 0
 
 
@@ -740,7 +947,7 @@ def get_due_logic_summary():
     return {
         "intervals": REVISION_INTERVALS,
         "labels": REVISION_STAGE_LABELS,
-        "description": "Every new learning item is scheduled for review on Day 1, 3, 6, 29 and 179. Missed reviews remain overdue until completed, so weaker memories keep resurfacing."
+        "description": "Every new learning item is scheduled for review on Day 1, 4, 7, 30 and 180. Missed reviews remain overdue until completed, so weaker memories keep resurfacing."
     }
 
 def get_revision_stats(user_id):
@@ -855,6 +1062,7 @@ def extract_from_url(url):
 
 # ─── GOOGLE DRIVE ───
 def _build_creds(user_id):
+    """Build Google Credentials from stored token data with refresh token support."""
     cj = get_drive_credentials(user_id)
     if not cj:
         return None
@@ -868,18 +1076,71 @@ def _build_creds(user_id):
             client_secret=data.get("client_secret"),
             scopes=data.get("scopes") or SCOPES
         )
-    except:
+    except Exception as e:
+        logger.error(f"_build_creds error for user {user_id}: {e}")
         return None
 
+def verify_drive_permissions(service):
+    """Verify that Drive API has proper permissions by attempting a simple operation."""
+    if not service:
+        return False, "Service not initialized"
+    try:
+        # Try to list files - this verifies Drive API access
+        service.files().list(pageSize=1, fields="files(id)").execute()
+        return True, "Permissions verified"
+    except Exception as e:
+        logger.error(f"Drive permissions verification failed: {e}")
+        return False, str(e)
+
 def get_drive_service(user_id):
+    """Get Drive service with credential refresh support."""
     creds = _build_creds(user_id)
-    return build("drive", "v3", credentials=creds) if creds else None
+    if not creds:
+        return None
+    try:
+        # Refresh token if expired
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            # Save refreshed credentials
+            cd = {
+                'token': creds.token,
+                'refresh_token': creds.refresh_token,
+                'token_uri': creds.token_uri,
+                'client_id': creds.client_id,
+                'client_secret': creds.client_secret,
+                'scopes': list(creds.scopes) if creds.scopes else SCOPES
+            }
+            save_drive_credentials(user_id, json.dumps(cd))
+            logger.info(f"Refreshed Drive credentials for user {user_id}")
+        return build("drive", "v3", credentials=creds)
+    except Exception as e:
+        logger.error(f"get_drive_service error for user {user_id}: {e}")
+        return None
 
 def get_sheets_service(user_id):
+    """Get Sheets service with credential refresh support."""
     creds = _build_creds(user_id)
-    return build("sheets", "v4", credentials=creds) if creds else None
+    if not creds:
+        return None
+    try:
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            cd = {
+                'token': creds.token,
+                'refresh_token': creds.refresh_token,
+                'token_uri': creds.token_uri,
+                'client_id': creds.client_id,
+                'client_secret': creds.client_secret,
+                'scopes': list(creds.scopes) if creds.scopes else SCOPES
+            }
+            save_drive_credentials(user_id, json.dumps(cd))
+        return build("sheets", "v4", credentials=creds)
+    except Exception as e:
+        logger.error(f"get_sheets_service error for user {user_id}: {e}")
+        return None
 
 def get_or_create_folder(service):
+    """Get or create the Learning Intake folder in Drive."""
     if not service:
         return None
     try:
@@ -889,40 +1150,73 @@ def get_or_create_folder(service):
         ).execute()
         files = r.get("files", [])
         if files:
+            logger.info(f"Found existing Drive folder: {files[0]['id']}")
             return files[0]["id"]
         f = service.files().create(
             body={"name": APP_FOLDER_NAME, "mimeType": "application/vnd.google-apps.folder"},
             fields="id"
         ).execute()
+        logger.info(f"Created new Drive folder: {f['id']}")
         return f["id"]
-    except:
+    except Exception as e:
+        logger.error(f"get_or_create_folder error: {e}")
         return None
 
 def upload_to_drive(user_id, supabase_path, filename):
+    """
+    Upload file to Google Drive.
+    Returns dict with file_id and drive_link, or None on failure.
+    """
     try:
         service = get_drive_service(user_id)
         if not service:
+            logger.error(f"Cannot get Drive service for user {user_id}")
             return None
+        
+        # Verify permissions before upload
+        verified, msg = verify_drive_permissions(service)
+        if not verified:
+            logger.error(f"Drive permissions check failed: {msg}")
+            return None
+        
         folder_id = get_or_create_folder(service)
         if not folder_id:
+            logger.error("Cannot get or create Drive folder")
             return None
+        
         data = download_from_supabase(supabase_path)
         if not data:
+            logger.error("Cannot download from Supabase")
             return None
+        
         with NamedTemporaryFile(delete=False) as tmp:
             tmp.write(data)
             tp = tmp.name
+        
         media = MediaFileUpload(tp, resumable=True)
         uploaded = service.files().create(
             body={"name": filename, "parents": [folder_id]},
-            media_body=media, fields="id"
+            media_body=media, 
+            fields="id"
         ).execute()
+        
+        # Make file publicly readable
         service.permissions().create(
             fileId=uploaded["id"],
             body={"type": "anyone", "role": "reader"}
         ).execute()
+        
         os.unlink(tp)
-        return f"https://drive.google.com/file/d/{uploaded['id']}/view"
+        
+        file_id = uploaded["id"]
+        drive_link = f"https://drive.google.com/file/d/{file_id}/view"
+        
+        logger.info(f"Successfully uploaded to Drive: file_id={file_id}, link={drive_link}")
+        
+        return {
+            "file_id": file_id,
+            "drive_link": drive_link
+        }
     except Exception as e:
         logger.error(f"Drive upload error: {e}")
         return None
@@ -961,6 +1255,7 @@ def append_to_sheet(user_id, data):
 
 # ─── AUTH ───
 @app.route("/api/auth/register", methods=["POST"])
+@limiter.limit("5 per hour")
 def api_register():
     try:
         data = request.get_json(force=True, silent=True) or {}
@@ -968,10 +1263,19 @@ def api_register():
         password = data.get("password", "").strip()
         email = data.get("email", "").strip()
 
-        if not username or not password or not email:
-            return jsonify({"error": "All fields required"}), 400
-        if len(password) < 6:
-            return jsonify({"error": "Password must be at least 6 characters"}), 400
+        # Validate inputs
+        valid, error = validate_username(username)
+        if not valid:
+            return jsonify({"error": error}), 400
+        
+        valid, error = validate_email(email)
+        if not valid:
+            return jsonify({"error": error}), 400
+        
+        valid, error = validate_password(password)
+        if not valid:
+            return jsonify({"error": error}), 400
+
         if not supabase:
             return jsonify({"error": "Backend database not configured. Contact administrator."}), 503
         if get_user_by_username(username):
@@ -995,13 +1299,22 @@ def api_register():
 
 
 @app.route("/api/auth/login", methods=["POST"])
+@limiter.limit("10 per hour")
 def api_login():
     try:
         data = request.get_json(force=True, silent=True) or {}
         username = data.get("username", "").strip()
         password = data.get("password", "").strip()
-        if not username or not password:
-            return jsonify({"error": "Credentials required"}), 400
+        
+        # Validate inputs
+        valid, error = validate_username(username)
+        if not valid:
+            return jsonify({"error": error}), 400
+        
+        valid, error = validate_password(password)
+        if not valid:
+            return jsonify({"error": error}), 400
+        
         if not supabase:
             return jsonify({"error": "Backend database not configured"}), 503
         user = get_user_by_username(username)
@@ -1121,8 +1434,12 @@ def api_notification_preferences():
     if notification_hour < 0 or notification_hour > 23:
         return jsonify({"error": "notification_hour must be between 0 and 23"}), 400
 
+    # Validate phone number
     normalized_phone = None
     if raw_phone:
+        valid, error = validate_phone_number(raw_phone)
+        if not valid:
+            return jsonify({"error": error}), 400
         try:
             normalized_phone = normalize_phone_number(raw_phone)
         except ValueError as exc:
@@ -1394,6 +1711,7 @@ def api_drive_disconnect():
 # ─── UPLOAD & PREVIEW ───
 @app.route("/api/upload/preview", methods=["POST"])
 @login_required
+@limiter.limit("20 per hour")
 def api_preview():
     uid = request.user_id
     file = request.files.get("file")
@@ -1401,6 +1719,19 @@ def api_preview():
     text_input = request.form.get("text", "").strip()
 
     if file and file.filename:
+        # Validate file size (max 10MB)
+        file.seek(0, os.SEEK_END)
+        file_size = file.tell()
+        file.seek(0)
+        if file_size > 10 * 1024 * 1024:  # 10MB
+            return jsonify({"error": "File too large (max 10MB)"}), 400
+        
+        # Validate file type
+        allowed_extensions = {'.pdf', '.docx', '.doc', '.txt', '.md'}
+        ext = Path(file.filename).suffix.lower()
+        if ext not in allowed_extensions:
+            return jsonify({"error": f"File type not allowed. Allowed: {', '.join(allowed_extensions)}"}), 400
+        
         data = file.read()
         fn = file.filename
         sp = upload_to_supabase(uid, data, fn)
@@ -1415,6 +1746,10 @@ def api_preview():
             "filename": fn, "content_snippet": content[:500]
         })
     elif url_input:
+        # Validate URL
+        valid, error = validate_url(url_input)
+        if not valid:
+            return jsonify({"error": error}), 400
         content = extract_from_url(url_input)
         heading, desc = gemini.generate(content)
         return jsonify({
@@ -1423,6 +1758,8 @@ def api_preview():
             "content_snippet": content[:500]
         })
     elif text_input:
+        if len(text_input) > 50000:  # Max 50KB of text
+            return jsonify({"error": "Text too long (max 50,000 characters)"}), 400
         heading, desc = gemini.generate(text_input)
         return jsonify({
             "heading": heading, "description": desc,
@@ -1447,10 +1784,15 @@ def api_save():
         return jsonify({"error": "Title is required"}), 400
 
     drive_link = None
+    drive_file_id = None
     state = get_user_state(uid)
     dc = state and state.get('drive_connected') and get_drive_credentials(uid)
     if dc and source == "file" and supabase_path and filename:
-        drive_link = upload_to_drive(uid, supabase_path, filename)
+        drive_result = upload_to_drive(uid, supabase_path, filename)
+        if drive_result:
+            drive_link = drive_result.get('drive_link')
+            drive_file_id = drive_result.get('file_id')
+            logger.info(f"Drive upload successful: file_id={drive_file_id}, link={drive_link}")
 
     try:
         insert_data = {
@@ -1467,6 +1809,8 @@ def api_save():
             insert_data['supabase_path'] = supabase_path
         if drive_link:
             insert_data['drive_link'] = drive_link
+        if drive_file_id:
+            insert_data['drive_file_id'] = drive_file_id
 
         lr = supabase.table('learnings').insert(insert_data).execute()
         lid = lr.data[0]['id']
