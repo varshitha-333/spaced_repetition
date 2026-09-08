@@ -164,8 +164,8 @@ export default function Profile() {
 
   const addInterval = () => {
     const days = parseInt(intervalInput);
-    if (isNaN(days) || days <= 0) {
-      toast.error('Please enter a valid number of days');
+    if (isNaN(days) || days < 0) {
+      toast.error('Please enter a valid number of days (0 = today)');
       return;
     }
     if (intervals.includes(days)) {
@@ -284,7 +284,7 @@ export default function Profile() {
             <div>
               <div className="font-semibold mb-1">Custom revision schedule</div>
               <div className="text-sm text-ink-muted">
-                Set custom intervals (in days) for your revisions. Default is 1, 4, 7, 30, 180 days.
+                Set custom intervals (in days) for your revisions. Default is 1, 4, 7, 30, 180 days. Enter 0 to review today.
               </div>
             </div>
             <div>

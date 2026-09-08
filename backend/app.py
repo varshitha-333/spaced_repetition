@@ -1763,12 +1763,12 @@ def api_revision_intervals():
     if len(intervals) == 0:
         return jsonify({"error": "intervals cannot be empty"}), 400
 
-    # Validate each interval is a positive integer
+    # Validate each interval is a non-negative integer (0 = today)
     try:
         validated_intervals = [int(i) for i in intervals]
         for i in validated_intervals:
-            if i <= 0:
-                return jsonify({"error": "All intervals must be positive numbers"}), 400
+            if i < 0:
+                return jsonify({"error": "All intervals must be 0 or positive numbers"}), 400
     except (ValueError, TypeError):
         return jsonify({"error": "All intervals must be valid numbers"}), 400
 
