@@ -6,6 +6,7 @@ import {
   getProfile, updateProfile, submitReview,
   connectDrive, disconnectDrive,
   enableSms, testSms,
+  getRevisionIntervals, setRevisionIntervals,
 } from '../services/api';
 import { useAuth } from '../hooks/useAuth';
 import Navbar from '../components/Navbar';
@@ -17,6 +18,9 @@ export default function Profile() {
   const [sms, setSms] = useState({ enabled: false, countryCode: '+91', phone: '' });
   const [review, setReview] = useState({ rating: 5, text: '' });
   const [tab, setTab] = useState('profile');
+  const [intervals, setIntervals] = useState([]);
+  const [intervalInput, setIntervalInput] = useState('');
+  const [isCustomIntervals, setIsCustomIntervals] = useState(false);
 
   const load = async () => {
     try {
@@ -39,10 +43,10 @@ export default function Profile() {
           '+971', '+353', '+65', '+64', '+46', '+47', '+45', '+31', '+39', '+34',
           '+1', '+44', '+91', '+61', '+81', '+86', '+49', '+33', '+7', '+55', '+52', '+27'
         ];
-        
+
         // Sort by length (longest first) to match +971 before +1
         countryCodes.sort((a, b) => b.length - a.length);
-        
+
         // Try to match known country codes
         let matched = false;
         for (const code of countryCodes) {
@@ -66,11 +70,12 @@ export default function Profile() {
           }
         }
       }
-      setSms({
-        enabled: !!data.sms_enabled,
-        countryCode: countryCode,
-        phone: phoneOnly,
-      });
+      setSms({ enabled: data.sms_notifications_enabled || false, countryCode, phone: phoneOnly });
+
+      // Load revision intervals
+      const intervalsRes = await getRevisionIntervals();
+      setIntervals(intervalsRes.data.intervals || []);
+      setIsCustomIntervals(intervalsRes.data.is_custom || false);
     } catch (e) {
       toast.error('Failed to load profile');
     }
@@ -157,6 +162,50 @@ export default function Profile() {
     }
   };
 
+  const addInterval = () => {
+    const days = parseInt(intervalInput);
+    if (isNaN(days) || days <= 0) {
+      toast.error('Please enter a valid number of days');
+      return;
+    }
+    if (intervals.includes(days)) {
+      toast.error('This interval already exists');
+      return;
+    }
+    const newIntervals = [...intervals, days].sort((a, b) => a - b);
+    setIntervals(newIntervals);
+    setIntervalInput('');
+  };
+
+  const removeInterval = (days) => {
+    if (intervals.length <= 1) {
+      toast.error('You need at least one revision interval');
+      return;
+    }
+    setIntervals(intervals.filter(i => i !== days));
+  };
+
+  const saveIntervals = async () => {
+    try {
+      await setRevisionIntervals(intervals);
+      setIsCustomIntervals(true);
+      toast.success('Revision intervals saved ✓');
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to save intervals');
+    }
+  };
+
+  const resetToDefault = async () => {
+    try {
+      await setRevisionIntervals([1, 4, 7, 30, 180]);
+      setIntervals([1, 4, 7, 30, 180]);
+      setIsCustomIntervals(false);
+      toast.success('Reset to default intervals');
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to reset');
+    }
+  };
+
   if (!p) return (
     <div className="min-h-screen flex items-center justify-center">
       <div className="text-ink-muted">Loading profile…</div>
@@ -202,6 +251,7 @@ export default function Profile() {
         <div className="flex gap-1 mb-5 card-quiet p-1 w-fit">
           {[
             { k: 'profile', l: '👤 Profile' },
+            { k: 'intervals', l: '📅 Revision schedule' },
             { k: 'sms',     l: '📱 SMS reminders' },
             { k: 'drive',   l: '🔗 Google Drive' },
             { k: 'review',  l: '⭐ Leave a review' },
@@ -225,6 +275,56 @@ export default function Profile() {
               onChange={v => setForm({ ...form, phone: v })}
               placeholder="+91 9876543210" />
             <button onClick={saveProfile} className="btn-primary">Save changes</button>
+          </div>
+        )}
+
+        {/* ─── Revision Intervals tab ─── */}
+        {tab === 'intervals' && (
+          <div className="card p-6 space-y-4">
+            <div>
+              <div className="font-semibold mb-1">Custom revision schedule</div>
+              <div className="text-sm text-ink-muted">
+                Set custom intervals (in days) for your revisions. Default is 1, 4, 7, 30, 180 days.
+              </div>
+            </div>
+            <div>
+              <div className="label mb-2">Current intervals (days)</div>
+              <div className="flex flex-wrap gap-2 mb-3">
+                {intervals.map((days, idx) => (
+                  <div key={idx} className="flex items-center gap-2 bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded-lg">
+                    <span className="font-medium">Day {days}</span>
+                    <button
+                      onClick={() => removeInterval(days)}
+                      className="text-indigo-500 hover:text-indigo-700 font-bold"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="number"
+                className="input flex-1"
+                placeholder="Enter days (e.g., 14 for 2 weeks, 180 for 6 months)"
+                value={intervalInput}
+                onChange={e => setIntervalInput(e.target.value)}
+                min="1"
+              />
+              <button onClick={addInterval} className="btn-secondary">Add</button>
+            </div>
+            <div className="flex gap-2 pt-2">
+              <button onClick={saveIntervals} className="btn-primary flex-1">Save custom intervals</button>
+              {isCustomIntervals && (
+                <button onClick={resetToDefault} className="btn-secondary">Reset to default</button>
+              )}
+            </div>
+            {isCustomIntervals && (
+              <div className="text-xs text-ink-muted mt-2">
+                ✓ Using custom intervals
+              </div>
+            )}
           </div>
         )}
 

@@ -980,11 +980,23 @@ def update_streak(user_id):
 
 
 # ─── REVISIONS ───
+def get_user_revision_intervals(user_id):
+    """Get user's custom revision intervals or default intervals."""
+    try:
+        r = supabase.table('user_state').select('custom_revision_intervals').eq('user_id', user_id).execute()
+        if r.data and r.data[0].get('custom_revision_intervals'):
+            return r.data[0]['custom_revision_intervals']
+        return REVISION_INTERVALS
+    except Exception as e:
+        logger.error(f"Error getting user intervals: {e}")
+        return REVISION_INTERVALS
+
 def schedule_revisions(user_id, item_id, heading, description, drive_link=None, url=None, supabase_path=None):
     if not supabase: return False
     try:
         today = date.today()
-        for i, interval in enumerate(REVISION_INTERVALS, 1):
+        intervals = get_user_revision_intervals(user_id)
+        for i, interval in enumerate(intervals, 1):
             sd = today + timedelta(days=interval)
             supabase.table('revisions').insert({
                 'user_id': user_id,
@@ -999,7 +1011,7 @@ def schedule_revisions(user_id, item_id, heading, description, drive_link=None, 
                 'completed': False,
                 'notes': f"Stage {i} - {interval} day revision"
             }).execute()
-        first_date = today + timedelta(days=REVISION_INTERVALS[0])
+        first_date = today + timedelta(days=intervals[0])
         supabase.table('learnings').update({
             'revision_stage': 1,
             'next_revision_date': first_date.isoformat()
@@ -1723,6 +1735,61 @@ def api_notification_preferences():
             "twilio_configured": is_twilio_configured(),
         }
     })
+    return jsonify({"ok": True})
+
+
+@app.route("/api/revisions/intervals", methods=["GET", "PUT"])
+@login_required
+def api_revision_intervals():
+    """Get or set user's custom revision intervals."""
+    uid = request.user_id
+    state = get_user_state(uid) or {}
+
+    if request.method == "GET":
+        intervals = state.get('custom_revision_intervals')
+        return jsonify({
+            "intervals": intervals if intervals else REVISION_INTERVALS,
+            "is_custom": bool(intervals),
+            "default_intervals": REVISION_INTERVALS
+        })
+
+    data = request.get_json(force=True, silent=True) or {}
+    intervals = data.get('intervals')
+
+    # Validate intervals
+    if not intervals or not isinstance(intervals, list):
+        return jsonify({"error": "intervals must be an array of numbers"}), 400
+
+    if len(intervals) == 0:
+        return jsonify({"error": "intervals cannot be empty"}), 400
+
+    # Validate each interval is a positive integer
+    try:
+        validated_intervals = [int(i) for i in intervals]
+        for i in validated_intervals:
+            if i <= 0:
+                return jsonify({"error": "All intervals must be positive numbers"}), 400
+    except (ValueError, TypeError):
+        return jsonify({"error": "All intervals must be valid numbers"}), 400
+
+    # Sort intervals ascending
+    validated_intervals.sort()
+
+    # Save to user_state
+    try:
+        result = supabase.table('user_state').upsert({
+            'user_id': uid,
+            'custom_revision_intervals': validated_intervals
+        }, on_conflict='user_id').execute()
+        logger.info(f"[REVISION INTERVALS] Updated intervals for user {uid}: {validated_intervals}")
+        return jsonify({
+            "ok": True,
+            "intervals": validated_intervals,
+            "is_custom": True
+        })
+    except Exception as e:
+        logger.error(f"[REVISION INTERVALS] Error saving intervals: {e}")
+        return jsonify({"error": "Failed to save intervals"}), 500
 
 
 @app.route("/api/notifications/send-daily", methods=["POST"])

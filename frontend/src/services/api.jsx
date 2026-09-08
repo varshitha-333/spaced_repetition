@@ -98,6 +98,10 @@ export const getTopReviews = () => api.get('/api/reviews/top');
 export const getProfile    = () => api.get('/api/profile');
 export const updateProfile = (payload) => api.put('/api/profile', payload);
 
+// ─────────── Revision Intervals ───────────
+export const getRevisionIntervals = () => api.get('/api/revisions/intervals');
+export const setRevisionIntervals = (intervals) => api.put('/api/revisions/intervals', { intervals });
+
 // ─────────── AI (Premium) ───────────
 export const aiSummary     = (text)   => api.post('/api/ai/summary',     { text });
 export const aiFlashcards  = (text)   => api.post('/api/ai/flashcards',  { text });
