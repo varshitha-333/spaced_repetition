@@ -1049,7 +1049,7 @@ def _build_revision(row):
 # ─── GEMINI CLIENT ───
 class GeminiClient:
     def __init__(self):
-        self.model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
         self.api_key = os.getenv("GEMINI_API_KEY")
         self.headers = {"Content-Type": "application/json"}

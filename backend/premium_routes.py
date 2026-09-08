@@ -321,6 +321,7 @@ def sms_enable():
     """
     Body: { phone, enabled }
     Saves user's phone + enabled flag. Schedule is fixed: 8 AM + 9 PM local.
+    Prevents same phone number from being used by multiple accounts.
     """
     u = request.current_user
     data = request.get_json(silent=True) or {}
@@ -328,6 +329,22 @@ def sms_enable():
     enabled = bool(data.get("enabled", True))
     if enabled and not phone:
         return jsonify({"error": "phone_required"}), 400
+
+    # Check if phone number is already registered to another user
+    if enabled and phone:
+        try:
+            existing_users = _supabase.table("user_state").select("user_id").eq("notification_phone", phone).execute().data or []
+            # Filter out the current user
+            other_users = [user for user in existing_users if user.get("user_id") != u["id"]]
+            if other_users:
+                _logger.warning(f"[SMS ENABLE] Phone {phone} already registered to user {other_users[0]['user_id']}")
+                return jsonify({
+                    "error": "phone_already_registered", 
+                    "message": "This phone number is already connected to another account. Please use a different number or contact support to remove the duplicate account."
+                }), 400
+        except Exception as e:
+            _logger.error(f"[SMS ENABLE] Phone check failed: {e}")
+            return jsonify({"error": "db_error"}), 500
 
     try:
         _supabase.table("user_state").update({
@@ -381,29 +398,68 @@ def sms_cron(slot):
     if request.headers.get("X-Cron-Secret") != os.getenv("CRON_SECRET", "learnflow"):
         return jsonify({"error": "forbidden"}), 403
 
+    # Time-based validation to prevent wrong slot messages (can be bypassed with X-Test-Mode header)
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    current_hour = now.hour
+    test_mode = request.headers.get("X-Test-Mode", "").lower() == "true"
+    
+    # Morning slot should only run between 6 AM and 12 PM UTC
+    # Night slot should only run between 6 PM and 12 AM UTC
+    if not test_mode:
+        if slot == "morning" and (current_hour < 6 or current_hour >= 12):
+            _logger.warning(f"[SMS CRON] Morning slot called at wrong hour {current_hour} UTC, skipping")
+            return jsonify({"ok": True, "slot": slot, "skipped": "wrong_time", "current_hour": current_hour})
+        
+        if slot == "night" and (current_hour < 18 or current_hour >= 24):
+            _logger.warning(f"[SMS CRON] Night slot called at wrong hour {current_hour} UTC, skipping")
+            return jsonify({"ok": True, "slot": slot, "skipped": "wrong_time", "current_hour": current_hour})
+
     try:
         users = _supabase.table("user_state").select(
-            "user_id,notification_phone,sms_notifications_enabled"
+            "user_id,notification_phone,sms_notifications_enabled,sms_morning_hour,sms_night_hour,notification_timezone"
         ).eq("sms_notifications_enabled", True).execute().data or []
     except Exception as e:
         return jsonify({"error": f"db: {e}"}), 500
 
-    from datetime import datetime, timezone
-    today = datetime.now(timezone.utc).date()
+    today = now.date()
+    
+    _logger.info(f"[SMS CRON] {slot.upper()} slot starting, {len(users)} users with SMS enabled")
 
     sent = []
     for row in users:
         phone = row.get("notification_phone") or ""
         if not phone:
+            _logger.warning(f"[SMS CRON] User {row['user_id']} has SMS enabled but no phone")
             continue
         
         user_id = row["user_id"]
+        morning_hour = row.get("sms_morning_hour", 8)
+        night_hour = row.get("sms_night_hour", 21)
+        
+        # Check if this slot matches user's preferred time (simplified - uses UTC for now)
+        # In production, this should use user's timezone
+        should_send = False
+        if slot == "morning":
+            # Send if within 1 hour of user's morning time (UTC)
+            should_send = abs(current_hour - morning_hour) <= 1
+        elif slot == "night":
+            # Send if within 1 hour of user's night time (UTC)
+            should_send = abs(current_hour - night_hour) <= 1
+        
+        if not should_send and not test_mode:
+            _logger.info(f"[SMS CRON] Skipping user {user_id} - UTC time {current_hour} doesn't match {slot} hour ({morning_hour if slot == 'morning' else night_hour})")
+            continue
+        
+        _logger.info(f"[SMS CRON] Processing user {user_id}, phone {phone}")
         
         # Fetch today's revisions for this user
         try:
             revisions = _supabase.table("revisions").select(
                 "id,learning_id,scheduled_date,completed"
             ).eq("user_id", user_id).eq("completed", False).lte("scheduled_date", today.isoformat()).execute().data or []
+            
+            _logger.info(f"[SMS CRON] User {user_id} has {len(revisions)} pending revisions")
             
             # Fetch learning titles
             learning_ids = [r.get("learning_id") for r in revisions if r.get("learning_id")]
@@ -449,8 +505,10 @@ def sms_cron(slot):
                 body = "🌙 Night check-in from LearnFlow!"
         
         r = _send_sms_real_or_mock(phone, body)
+        _logger.info(f"[SMS CRON] Sent {slot} SMS to user {user_id}, phone {phone}, result: {r.get('mode')}")
         sent.append({"user_id": user_id, "result": r, "revision_count": revision_count})
 
+    _logger.info(f"[SMS CRON] {slot.upper()} slot completed, sent {len(sent)} messages")
     return jsonify({"ok": True, "slot": slot, "count": len(sent), "sent": sent})
 
 
@@ -549,6 +607,20 @@ def profile():
         update["sms_notifications_enabled"] = bool(data["sms_enabled"])
     if not update:
         return jsonify({"ok": True, "noop": True})
+    
+    # Check email uniqueness if email is being updated
+    if "premium_billing_email" in update:
+        try:
+            existing_users = _supabase.table("user_state").select("user_id").eq("premium_billing_email", update["premium_billing_email"]).execute().data or []
+            # Filter out the current user
+            other_users = [user for user in existing_users if user.get("user_id") != u["id"]]
+            if other_users:
+                _logger.warning(f"[PROFILE UPDATE] Email {update['premium_billing_email']} already registered to user {other_users[0]['user_id']}")
+                return jsonify({"error": "email_already_registered", "message": "This email is already connected to another account"}), 400
+        except Exception as e:
+            _logger.error(f"[PROFILE UPDATE] Email check failed: {e}")
+            return jsonify({"error": "db_error"}), 500
+    
     try:
         # First check if user_state exists, create if not
         existing = _supabase.table("user_state").select("*").eq("user_id", u["id"]).execute()

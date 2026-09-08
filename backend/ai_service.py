@@ -407,7 +407,7 @@ class UnifiedAIService:
             try:
                 if provider_name == "gemini":
                     api_key = os.getenv("GEMINI_API_KEY")
-                    model = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+                    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
                     if api_key:
                         provider = GeminiProvider(api_key, model)
                         self.providers.append(provider)
