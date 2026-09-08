@@ -151,6 +151,7 @@ app = Flask(__name__)
 # NOTE: premium blueprint is registered LATER, after decode_token is defined (see below).
 from premium_routes import premium_bp, init_premium
 from analytics_routes import analytics_bp, init_analytics
+from ai_service import UnifiedAIService
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-this-to-a-strong-secret-in-production")
 
 # Initialize rate limiter with app
@@ -1238,6 +1239,7 @@ class GeminiClient:
         return {k: v for k, v in outputs.items() if v is not None}
 
 gemini = GeminiClient()
+ai_service = UnifiedAIService()
 
 
 # ─── FILE HELPERS ───
@@ -2063,7 +2065,15 @@ def api_preview():
             return jsonify({"error": "File upload failed"}), 500
         dl = download_from_supabase(sp)
         content = extract_text(dl, fn) if dl else "[extraction failed]"
-        heading, desc = gemini.generate(content)
+        
+        # Use unified AI service with automatic fallback
+        ai_result = ai_service.generate(f"Generate a short title (max 10 words) and a brief description (max 50 words) for this content:\n\n{content}")
+        if ai_result.get('success'):
+            heading = ai_result.get('content', '').split('\n')[0] if '\n' in ai_result.get('content', '') else ai_result.get('content', '')[:100]
+            desc = ai_result.get('content', '')
+        else:
+            # Fallback to old Gemini client if unified service fails
+            heading, desc = gemini.generate(content)
         return jsonify({
             "heading": heading, "description": desc,
             "source": "file", "supabase_path": sp,
@@ -2075,7 +2085,15 @@ def api_preview():
         if not valid:
             return jsonify({"error": error}), 400
         content = extract_from_url(url_input)
-        heading, desc = gemini.generate(content)
+        
+        # Use unified AI service with automatic fallback
+        ai_result = ai_service.generate(f"Generate a short title (max 10 words) and a brief description (max 50 words) for this content:\n\n{content}")
+        if ai_result.get('success'):
+            heading = ai_result.get('content', '').split('\n')[0] if '\n' in ai_result.get('content', '') else ai_result.get('content', '')[:100]
+            desc = ai_result.get('content', '')
+        else:
+            # Fallback to old Gemini client if unified service fails
+            heading, desc = gemini.generate(content)
         return jsonify({
             "heading": heading, "description": desc,
             "source": "url", "url": url_input,
@@ -2084,7 +2102,15 @@ def api_preview():
     elif text_input:
         if len(text_input) > 50000:  # Max 50KB of text
             return jsonify({"error": "Text too long (max 50,000 characters)"}), 400
-        heading, desc = gemini.generate(text_input)
+        
+        # Use unified AI service with automatic fallback
+        ai_result = ai_service.generate(f"Generate a short title (max 10 words) and a brief description (max 50 words) for this content:\n\n{text_input}")
+        if ai_result.get('success'):
+            heading = ai_result.get('content', '').split('\n')[0] if '\n' in ai_result.get('content', '') else ai_result.get('content', '')[:100]
+            desc = ai_result.get('content', '')
+        else:
+            # Fallback to old Gemini client if unified service fails
+            heading, desc = gemini.generate(text_input)
         return jsonify({
             "heading": heading, "description": desc,
             "source": "text", "content_snippet": text_input[:500]
