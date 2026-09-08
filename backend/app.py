@@ -2010,10 +2010,14 @@ def api_drive_callback():
             return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=error&reason=save_failed")
         
         # Verify the connection works immediately
-        service = get_drive_service(uid)
-        if not service:
-            logger.error(f"[Drive callback] Failed to create Drive service for user {uid}")
-            return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=error&reason=service_failed")
+        try:
+            service = get_drive_service(uid)
+            if not service:
+                logger.error(f"[Drive callback] Failed to create Drive service for user {uid} - _build_creds returned None")
+                return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=error&reason=service_failed")
+        except Exception as e:
+            logger.error(f"[Drive callback] Exception creating Drive service for user {uid}: {e}\n{traceback.format_exc()}")
+            return flask_redirect(f"{FRONTEND_URL}/dashboard?drive=error&reason=service_exception")
         
         verified, msg = verify_drive_permissions(service)
         if not verified:

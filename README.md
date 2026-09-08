@@ -276,7 +276,7 @@ npm run dev
    - **Root Directory**: `backend` (if monorepo) or `/` (if separate repo)
    - **Runtime**: Python
    - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `gunicorn app:app --bind 0.0.0.0:$PORT --workers 2`
+   - **Start Command**: `gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 60`
 
 4. **Environment Variables** (add in Render dashboard):
    ```

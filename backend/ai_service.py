@@ -173,7 +173,7 @@ class AIResultCache:
 class GeminiProvider(AIProvider):
     """Google Gemini AI provider."""
     
-    def __init__(self, api_key: str, model: str = "gemini-1.5-pro", timeout: int = 30):
+    def __init__(self, api_key: str, model: str = "gemini-1.5-pro", timeout: int = 10):
         super().__init__(api_key, model, timeout)
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
     
@@ -241,7 +241,7 @@ class GeminiProvider(AIProvider):
 class NVIDIANIMProvider(AIProvider):
     """NVIDIA NIM API provider."""
     
-    def __init__(self, api_key: str, model: str = "meta/llama-3.1-405b-instruct", timeout: int = 30):
+    def __init__(self, api_key: str, model: str = "meta/llama-3.1-405b-instruct", timeout: int = 10):
         super().__init__(api_key, model, timeout)
         self.base_url = "https://integrate.api.nvidia.com/v1"
     
@@ -313,7 +313,7 @@ class NVIDIANIMProvider(AIProvider):
 class OpenRouterProvider(AIProvider):
     """OpenRouter API provider."""
     
-    def __init__(self, api_key: str, model: str = "anthropic/claude-3.5-sonnet", timeout: int = 30):
+    def __init__(self, api_key: str, model: str = "anthropic/claude-3.5-sonnet", timeout: int = 10):
         super().__init__(api_key, model, timeout)
         self.base_url = "https://openrouter.ai/api/v1"
     
