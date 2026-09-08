@@ -732,10 +732,12 @@ def update_user_state(user_id, **kwargs):
 def save_drive_credentials(user_id, creds_json):
     if not supabase: return False
     try:
-        result = supabase.table('user_state').update({
+        # Use upsert to insert if row doesn't exist, or update if it does
+        result = supabase.table('user_state').upsert({
+            'user_id': user_id,
             'google_drive_credentials': creds_json,
             'drive_connected': True
-        }).eq('user_id', user_id).execute()
+        }, on_conflict='user_id').execute()
         logger.info(f"[save_drive_credentials] Saved credentials for user {user_id}, result: {result}")
         return True
     except Exception as e:
