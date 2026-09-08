@@ -732,21 +732,25 @@ def update_user_state(user_id, **kwargs):
 def save_drive_credentials(user_id, creds_json):
     if not supabase: return False
     try:
-        supabase.table('user_state').update({
+        result = supabase.table('user_state').update({
             'google_drive_credentials': creds_json,
             'drive_connected': True
         }).eq('user_id', user_id).execute()
+        logger.info(f"[save_drive_credentials] Saved credentials for user {user_id}, result: {result}")
         return True
     except Exception as e:
-        logger.error(f"save_drive_credentials error: {e}")
+        logger.error(f"save_drive_credentials error for user {user_id}: {e}")
         return False
 
 def get_drive_credentials(user_id):
     if not supabase: return None
     try:
         r = supabase.table('user_state').select('google_drive_credentials').eq('user_id', user_id).execute()
+        logger.info(f"[get_drive_credentials] Query result for user {user_id}: has data={bool(r.data)}, data count={len(r.data) if r.data else 0}")
         if r.data and r.data[0]['google_drive_credentials']:
+            logger.info(f"[get_drive_credentials] Found credentials for user {user_id}")
             return r.data[0]['google_drive_credentials']
+        logger.warning(f"[get_drive_credentials] No credentials found in result for user {user_id}")
         return None
     except Exception as e:
         logger.error(f"get_drive_credentials error: {e}")
@@ -1286,9 +1290,11 @@ def _build_creds(user_id):
     """Build Google Credentials from stored token data with refresh token support."""
     cj = get_drive_credentials(user_id)
     if not cj:
+        logger.error(f"[_build_creds] No credentials found in database for user {user_id}")
         return None
     try:
         data = json.loads(cj) if isinstance(cj, str) else cj
+        logger.info(f"[_build_creds] Parsed credentials for user {user_id}, has token: {bool(data.get('token'))}, has refresh_token: {bool(data.get('refresh_token'))}")
         return Credentials(
             token=data.get("token"),
             refresh_token=data.get("refresh_token"),
@@ -1298,7 +1304,7 @@ def _build_creds(user_id):
             scopes=data.get("scopes") or SCOPES
         )
     except Exception as e:
-        logger.error(f"_build_creds error for user {user_id}: {e}")
+        logger.error(f"_build_creds error for user {user_id}: {e}\n{traceback.format_exc()}")
         return None
 
 def verify_drive_permissions(service):
